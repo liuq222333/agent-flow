@@ -1,0 +1,82 @@
+- generic [ref=e1]:
+  - main [ref=e2]:
+    - complementary [ref=e3]:
+      - generic [ref=e4]:
+        - paragraph [ref=e5]: Agent Flow
+        - heading "工作流控制台" [level=1] [ref=e6]
+      - navigation "管理入口" [ref=e7]:
+        - button "Workflow" [ref=e8] [cursor=pointer]:
+          - img [ref=e9]
+          - generic [ref=e13]: Workflow
+        - button "Knowledge" [active] [ref=e14] [cursor=pointer]:
+          - img [ref=e15]
+          - generic [ref=e17]: Knowledge
+        - button "Tools" [ref=e18] [cursor=pointer]:
+          - img [ref=e19]
+          - generic [ref=e21]: Tools
+        - button "Secrets" [ref=e22] [cursor=pointer]:
+          - img [ref=e23]
+          - generic [ref=e26]: Secrets
+        - button "Models" [ref=e27] [cursor=pointer]:
+          - img [ref=e28]
+          - generic [ref=e31]: Models
+      - generic [ref=e208]:
+        - strong [ref=e209]: Knowledge
+        - generic [ref=e210]: 管理数据来自本地 API，表单提交后自动刷新。
+      - generic [ref=e117]: 知识库已同步
+    - generic [ref=e211]:
+      - generic [ref=e212]:
+        - generic [ref=e213]:
+          - paragraph [ref=e214]: Knowledge
+          - heading "知识库" [level=2] [ref=e215]
+          - paragraph [ref=e216]: 管理检索节点可引用的知识库，并查看已上传 documents 的基础信息。
+        - button "刷新" [ref=e217] [cursor=pointer]:
+          - img [ref=e218]
+          - text: 刷新
+      - generic [ref=e223]:
+        - generic [ref=e224]:
+          - generic [ref=e225]:
+            - img [ref=e226]
+            - text: 新建知识库
+          - generic [ref=e228]:
+            - generic [ref=e229]: name
+            - textbox "name" [ref=e230]
+          - generic [ref=e231]:
+            - generic [ref=e232]: description
+            - textbox "description" [ref=e233]
+          - generic [ref=e234]:
+            - generic [ref=e235]: embedding_model
+            - textbox "embedding_model" [ref=e236]: local-embedding
+          - button "创建" [ref=e237] [cursor=pointer]:
+            - img [ref=e238]
+            - text: 创建
+        - generic [ref=e239]:
+          - generic [ref=e240]:
+            - img [ref=e241]
+            - text: Knowledge Bases
+          - button "kb smoke 20260517-212134 active local-embedding" [ref=e246] [cursor=pointer]:
+            - generic [ref=e247]: kb smoke 20260517-212134
+            - generic [ref=e248]: active
+            - emphasis [ref=e249]: local-embedding
+      - generic [ref=e250]:
+        - generic [ref=e251]:
+          - img [ref=e252]
+          - text: Documents
+        - table [ref=e258]:
+          - rowgroup [ref=e259]:
+            - row "ID File Status Size Created" [ref=e260]:
+              - columnheader "ID" [ref=e261]
+              - columnheader "File" [ref=e262]
+              - columnheader "Status" [ref=e263]
+              - columnheader "Size" [ref=e264]
+              - columnheader "Created" [ref=e265]
+          - rowgroup [ref=e266]:
+            - row "#1 agent-flow-smoke-20260517-212134.txt indexed 76 B 2026/5/17 21:21:36" [ref=e267]:
+              - cell "#1" [ref=e268]
+              - cell "agent-flow-smoke-20260517-212134.txt" [ref=e269]
+              - cell "indexed" [ref=e270]
+              - cell "76 B" [ref=e271]
+              - cell "2026/5/17 21:21:36" [ref=e272]
+  - button "Open Next.js Dev Tools" [ref=e278] [cursor=pointer]:
+    - img [ref=e279]
+  - alert [ref=e282]

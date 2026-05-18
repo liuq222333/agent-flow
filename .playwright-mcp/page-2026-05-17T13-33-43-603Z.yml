@@ -1,0 +1,60 @@
+- generic [ref=e1]:
+  - main [ref=e2]:
+    - complementary [ref=e3]:
+      - generic [ref=e4]:
+        - paragraph [ref=e5]: Agent Flow
+        - heading "工作流控制台" [level=1] [ref=e6]
+      - navigation "管理入口" [ref=e7]:
+        - button "Workflow" [ref=e8] [cursor=pointer]:
+          - img [ref=e9]
+          - generic [ref=e13]: Workflow
+        - button "Knowledge" [ref=e14] [cursor=pointer]:
+          - img [ref=e15]
+          - generic [ref=e17]: Knowledge
+        - button "Tools" [ref=e18] [cursor=pointer]:
+          - img [ref=e19]
+          - generic [ref=e21]: Tools
+        - button "Secrets" [active] [ref=e22] [cursor=pointer]:
+          - img [ref=e23]
+          - generic [ref=e26]: Secrets
+        - button "Models" [ref=e27] [cursor=pointer]:
+          - img [ref=e28]
+          - generic [ref=e31]: Models
+      - generic [ref=e212]:
+        - strong [ref=e213]: Secrets
+        - generic [ref=e214]: 管理数据来自本地 API，表单提交后自动刷新。
+      - generic [ref=e117]: Failed to fetch
+    - generic [ref=e332]:
+      - generic [ref=e333]:
+        - generic [ref=e334]:
+          - paragraph [ref=e335]: Secrets
+          - heading "Secrets" [level=2] [ref=e336]
+          - paragraph [ref=e337]: 创建和查看 secret 元数据；列表不会展示 value 或 encrypted_value。
+        - button "刷新" [ref=e338] [cursor=pointer]:
+          - img [ref=e339]
+          - text: 刷新
+      - generic [ref=e344]:
+        - generic [ref=e345]:
+          - generic [ref=e346]:
+            - img [ref=e347]
+            - text: 新建 Secret
+          - generic [ref=e350]:
+            - generic [ref=e351]: secret_key
+            - textbox "secret_key" [ref=e352]
+          - generic [ref=e353]:
+            - generic [ref=e354]: display_name
+            - textbox "display_name" [ref=e355]
+          - generic [ref=e356]:
+            - generic [ref=e357]: value
+            - textbox "value" [ref=e358]
+          - button "创建" [ref=e359] [cursor=pointer]:
+            - img [ref=e360]
+            - text: 创建
+        - generic [ref=e361]:
+          - generic [ref=e362]:
+            - img [ref=e363]
+            - text: Secret Metadata
+          - paragraph [ref=e368]: 暂无 secret
+  - button "Open Next.js Dev Tools" [ref=e292] [cursor=pointer]:
+    - img [ref=e293]
+  - alert [ref=e296]

@@ -1,0 +1,1629 @@
+openapi: 3.0.3
+info:
+  title: Agent Workflow Platform MVP API
+  version: 0.1.0
+  description: MVP API draft for workflow authoring, publishing, running, tracing, knowledge bases, tools, models, and secrets.
+
+servers:
+  - url: /api/v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Workflows
+  - name: Workflow Versions
+  - name: Runs
+  - name: Knowledge Bases
+  - name: Documents
+  - name: Tools
+  - name: Models
+  - name: Secrets
+  - name: Node Types
+  - name: Health
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /workflows:
+    post:
+      tags: [Workflows]
+      summary: Create workflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWorkflowRequest"
+      responses:
+        "200":
+          description: Created workflow
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDetail"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    get:
+      tags: [Workflows]
+      summary: List workflows
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, published, archived]
+        - name: keyword
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Workflow list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /workflows/{workflow_id}:
+    get:
+      tags: [Workflows]
+      summary: Get workflow detail
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+      responses:
+        "200":
+          description: Workflow detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDetail"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      tags: [Workflows]
+      summary: Update workflow draft
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWorkflowRequest"
+      responses:
+        "200":
+          description: Updated workflow
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDetail"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Workflows]
+      summary: Soft delete workflow
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+      responses:
+        "200":
+          description: Delete result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /workflows/{workflow_id}/validate:
+    post:
+      tags: [Workflows]
+      summary: Validate workflow graph
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ValidateGraphRequest"
+      responses:
+        "200":
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GraphValidationResult"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /workflows/{workflow_id}/publish:
+    post:
+      tags: [Workflows]
+      summary: Publish workflow version
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishWorkflowRequest"
+      responses:
+        "200":
+          description: Published version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishWorkflowResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /workflows/{workflow_id}/versions:
+    get:
+      tags: [Workflow Versions]
+      summary: List workflow versions
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Version list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowVersionListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /workflow-versions/{version_id}:
+    get:
+      tags: [Workflow Versions]
+      summary: Get workflow version detail
+      parameters:
+        - $ref: "#/components/parameters/VersionId"
+      responses:
+        "200":
+          description: Version detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowVersionDetail"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /workflows/{workflow_id}/run:
+    post:
+      tags: [Runs]
+      summary: Run workflow
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunWorkflowRequest"
+      responses:
+        "200":
+          description: Run result or async run id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunWorkflowResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /runs:
+    get:
+      tags: [Runs]
+      summary: List workflow runs
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: workflow_id
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: version_id
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/WorkflowRunStatus"
+      responses:
+        "200":
+          description: Run list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowRunListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /runs/{run_id}:
+    get:
+      tags: [Runs]
+      summary: Get run detail
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Run detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowRunDetail"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /runs/{run_id}/node-runs:
+    get:
+      tags: [Runs]
+      summary: List node runs for a workflow run
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Node run list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeRunListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /runs/{run_id}/trace:
+    get:
+      tags: [Runs]
+      summary: Get aggregated run trace
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Aggregated trace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunTraceResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /runs/{run_id}/cancel:
+    post:
+      tags: [Runs]
+      summary: Cancel workflow run
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Cancel result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run_id:
+                    type: integer
+                    format: int64
+                  status:
+                    $ref: "#/components/schemas/WorkflowRunStatus"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /knowledge-bases:
+    post:
+      tags: [Knowledge Bases]
+      summary: Create knowledge base
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateKnowledgeBaseRequest"
+      responses:
+        "200":
+          description: Knowledge base
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeBase"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    get:
+      tags: [Knowledge Bases]
+      summary: List knowledge bases
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: keyword
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Knowledge base list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeBaseListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /knowledge-bases/{kb_id}:
+    get:
+      tags: [Knowledge Bases]
+      summary: Get knowledge base detail
+      parameters:
+        - $ref: "#/components/parameters/KnowledgeBaseId"
+      responses:
+        "200":
+          description: Knowledge base
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeBase"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /knowledge-bases/{kb_id}/documents:
+    post:
+      tags: [Documents]
+      summary: Upload document to knowledge base
+      parameters:
+        - $ref: "#/components/parameters/KnowledgeBaseId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                metadata_json:
+                  type: string
+      responses:
+        "200":
+          description: Uploaded document
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadDocumentResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    get:
+      tags: [Documents]
+      summary: List documents in knowledge base
+      parameters:
+        - $ref: "#/components/parameters/KnowledgeBaseId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/DocumentStatus"
+      responses:
+        "200":
+          description: Document list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /knowledge-bases/{kb_id}/retrieve:
+    post:
+      tags: [Knowledge Bases]
+      summary: Test knowledge retrieval
+      parameters:
+        - $ref: "#/components/parameters/KnowledgeBaseId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetrieveKnowledgeRequest"
+      responses:
+        "200":
+          description: Retrieved chunks
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetrieveKnowledgeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /documents/{document_id}:
+    get:
+      tags: [Documents]
+      summary: Get document detail
+      parameters:
+        - $ref: "#/components/parameters/DocumentId"
+      responses:
+        "200":
+          description: Document detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Documents]
+      summary: Soft delete document
+      parameters:
+        - $ref: "#/components/parameters/DocumentId"
+      responses:
+        "200":
+          description: Delete result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /documents/{document_id}/retry:
+    post:
+      tags: [Documents]
+      summary: Retry document processing
+      parameters:
+        - $ref: "#/components/parameters/DocumentId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                from_stage:
+                  type: string
+                  example: embedding
+      responses:
+        "200":
+          description: Retry result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadDocumentResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /tools:
+    post:
+      tags: [Tools]
+      summary: Create tool
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateToolRequest"
+      responses:
+        "200":
+          description: Tool
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tool"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    get:
+      tags: [Tools]
+      summary: List tools
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [api]
+      responses:
+        "200":
+          description: Tool list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ToolListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /tools/{tool_id}:
+    get:
+      tags: [Tools]
+      summary: Get tool detail
+      parameters:
+        - $ref: "#/components/parameters/ToolId"
+      responses:
+        "200":
+          description: Tool
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tool"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      tags: [Tools]
+      summary: Update tool
+      parameters:
+        - $ref: "#/components/parameters/ToolId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateToolRequest"
+      responses:
+        "200":
+          description: Tool
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tool"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /tools/{tool_id}/test:
+    post:
+      tags: [Tools]
+      summary: Test tool
+      parameters:
+        - $ref: "#/components/parameters/ToolId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TestToolRequest"
+      responses:
+        "200":
+          description: Tool test result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TestToolResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /model-providers:
+    get:
+      tags: [Models]
+      summary: List model providers
+      responses:
+        "200":
+          description: Provider list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ModelProvider"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /model-configs:
+    get:
+      tags: [Models]
+      summary: List model configs
+      parameters:
+        - name: provider_id
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: model_type
+          in: query
+          schema:
+            type: string
+            enum: [chat, embedding, rerank]
+      responses:
+        "200":
+          description: Model config list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ModelConfig"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /secrets:
+    post:
+      tags: [Secrets]
+      summary: Create secret
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSecretRequest"
+      responses:
+        "200":
+          description: Secret metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Secret"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    get:
+      tags: [Secrets]
+      summary: List secrets without values
+      responses:
+        "200":
+          description: Secret list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Secret"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /secrets/{secret_id}:
+    put:
+      tags: [Secrets]
+      summary: Update secret
+      parameters:
+        - name: secret_id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateSecretRequest"
+      responses:
+        "200":
+          description: Secret metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Secret"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /node-types:
+    get:
+      tags: [Node Types]
+      summary: List node types
+      responses:
+        "200":
+          description: Node type list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/NodeTypeSummary"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /node-types/{node_type}/schema:
+    get:
+      tags: [Node Types]
+      summary: Get node type schema
+      parameters:
+        - name: node_type
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/NodeType"
+      responses:
+        "200":
+          description: Node schema
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeTypeSchema"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: page_size
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    WorkflowId:
+      name: workflow_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    VersionId:
+      name: version_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    KnowledgeBaseId:
+      name: kb_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    DocumentId:
+      name: document_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    ToolId:
+      name: tool_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+
+  responses:
+    ErrorResponse:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    JsonObject:
+      type: object
+      additionalProperties: true
+
+    Timestamp:
+      type: string
+      format: date-time
+
+    SuccessResponse:
+      type: object
+      required: [success]
+      properties:
+        success:
+          type: boolean
+          example: true
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              $ref: "#/components/schemas/JsonObject"
+        request_id:
+          type: string
+
+    WorkflowStatus:
+      type: string
+      enum: [draft, published, archived]
+
+    WorkflowRunStatus:
+      type: string
+      enum: [pending, running, completed, failed, cancelled]
+
+    NodeRunStatus:
+      type: string
+      enum: [running, success, failed, skipped, retrying]
+
+    NodeType:
+      type: string
+      enum: [start, input, llm, knowledge_base, intent, branch, api, message, output, end]
+
+    WorkflowGraph:
+      type: object
+      required: [schema_version, nodes, edges]
+      properties:
+        schema_version:
+          type: string
+          example: "1.0"
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowNode"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowEdge"
+
+    WorkflowNode:
+      type: object
+      required: [id, type, name, position, config]
+      properties:
+        id:
+          type: string
+          example: llm_1
+        type:
+          $ref: "#/components/schemas/NodeType"
+        name:
+          type: string
+        description:
+          type: string
+        position:
+          type: object
+          required: [x, y]
+          properties:
+            x:
+              type: number
+            y:
+              type: number
+        input_mapping:
+          $ref: "#/components/schemas/JsonObject"
+        output_mapping:
+          $ref: "#/components/schemas/JsonObject"
+        config:
+          $ref: "#/components/schemas/JsonObject"
+        retry:
+          $ref: "#/components/schemas/RetryPolicy"
+        timeout:
+          type: integer
+          example: 60
+        on_error:
+          $ref: "#/components/schemas/OnErrorPolicy"
+        enabled:
+          type: boolean
+          default: true
+
+    WorkflowEdge:
+      type: object
+      required: [id, source, target]
+      properties:
+        id:
+          type: string
+        source:
+          type: string
+        target:
+          type: string
+        label:
+          type: string
+        condition:
+          nullable: true
+          oneOf:
+            - type: string
+            - $ref: "#/components/schemas/JsonObject"
+
+    RetryPolicy:
+      type: object
+      properties:
+        max_attempts:
+          type: integer
+          minimum: 1
+          default: 1
+        backoff:
+          type: string
+          enum: [none, fixed, exponential]
+          default: none
+        retry_on:
+          type: array
+          items:
+            type: string
+
+    OnErrorPolicy:
+      type: object
+      properties:
+        strategy:
+          type: string
+          enum: [fail_workflow, skip_node, go_to_node]
+          default: fail_workflow
+        target:
+          type: string
+
+    CreateWorkflowRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        draft_graph_json:
+          $ref: "#/components/schemas/WorkflowGraph"
+
+    UpdateWorkflowRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        draft_graph_json:
+          $ref: "#/components/schemas/WorkflowGraph"
+
+    WorkflowDetail:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        description:
+          type: string
+        status:
+          $ref: "#/components/schemas/WorkflowStatus"
+        current_version_id:
+          type: integer
+          format: int64
+          nullable: true
+        draft_graph_json:
+          $ref: "#/components/schemas/WorkflowGraph"
+        created_by:
+          type: integer
+          format: int64
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    WorkflowListItem:
+      allOf:
+        - $ref: "#/components/schemas/WorkflowDetail"
+        - type: object
+          properties:
+            current_version:
+              type: integer
+              nullable: true
+            latest_run:
+              type: object
+              nullable: true
+              properties:
+                run_id:
+                  type: integer
+                  format: int64
+                status:
+                  $ref: "#/components/schemas/WorkflowRunStatus"
+                created_at:
+                  $ref: "#/components/schemas/Timestamp"
+
+    WorkflowListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowListItem"
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
+
+    ValidateGraphRequest:
+      type: object
+      required: [mode, graph_json]
+      properties:
+        mode:
+          type: string
+          enum: [draft, publish, run]
+        graph_json:
+          $ref: "#/components/schemas/WorkflowGraph"
+
+    GraphValidationResult:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphValidationIssue"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphValidationIssue"
+
+    GraphValidationIssue:
+      type: object
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        path:
+          type: string
+        node_id:
+          type: string
+          nullable: true
+
+    PublishWorkflowRequest:
+      type: object
+      properties:
+        release_note:
+          type: string
+
+    PublishWorkflowResponse:
+      type: object
+      properties:
+        workflow_id:
+          type: integer
+          format: int64
+        version_id:
+          type: integer
+          format: int64
+        version:
+          type: integer
+        schema_version:
+          type: string
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    WorkflowVersionSummary:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        workflow_id:
+          type: integer
+          format: int64
+        version:
+          type: integer
+        schema_version:
+          type: string
+        release_note:
+          type: string
+        published_by:
+          type: integer
+          format: int64
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    WorkflowVersionDetail:
+      allOf:
+        - $ref: "#/components/schemas/WorkflowVersionSummary"
+        - type: object
+          properties:
+            graph_json:
+              $ref: "#/components/schemas/WorkflowGraph"
+
+    WorkflowVersionListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowVersionSummary"
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
+
+    RunWorkflowRequest:
+      type: object
+      required: [input]
+      properties:
+        input:
+          $ref: "#/components/schemas/JsonObject"
+        version_id:
+          type: integer
+          format: int64
+        trigger_type:
+          type: string
+          enum: [manual, api, test]
+          default: manual
+        execution_mode:
+          type: string
+          enum: [sync, async]
+          default: sync
+
+    RunWorkflowResponse:
+      type: object
+      properties:
+        run_id:
+          type: integer
+          format: int64
+        status:
+          $ref: "#/components/schemas/WorkflowRunStatus"
+        output:
+          $ref: "#/components/schemas/JsonObject"
+        started_at:
+          $ref: "#/components/schemas/Timestamp"
+        ended_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    WorkflowRunDetail:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        workflow_id:
+          type: integer
+          format: int64
+        version_id:
+          type: integer
+          format: int64
+        status:
+          $ref: "#/components/schemas/WorkflowRunStatus"
+        trigger_type:
+          type: string
+        input_json:
+          $ref: "#/components/schemas/JsonObject"
+        output_json:
+          $ref: "#/components/schemas/JsonObject"
+        state_json:
+          $ref: "#/components/schemas/JsonObject"
+        error_code:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        started_at:
+          $ref: "#/components/schemas/Timestamp"
+        ended_at:
+          $ref: "#/components/schemas/Timestamp"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    WorkflowRunListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowRunDetail"
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
+
+    NodeRun:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        run_id:
+          type: integer
+          format: int64
+        node_id:
+          type: string
+        node_type:
+          $ref: "#/components/schemas/NodeType"
+        node_name:
+          type: string
+        status:
+          $ref: "#/components/schemas/NodeRunStatus"
+        attempt:
+          type: integer
+        input_json:
+          $ref: "#/components/schemas/JsonObject"
+        output_json:
+          $ref: "#/components/schemas/JsonObject"
+        error_code:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        duration_ms:
+          type: integer
+        metadata_json:
+          $ref: "#/components/schemas/JsonObject"
+        started_at:
+          $ref: "#/components/schemas/Timestamp"
+        ended_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    NodeRunListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeRun"
+
+    RunTraceResponse:
+      type: object
+      properties:
+        run:
+          $ref: "#/components/schemas/WorkflowRunDetail"
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeRun"
+        graph_json:
+          $ref: "#/components/schemas/WorkflowGraph"
+
+    KnowledgeBase:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+        embedding_model:
+          type: string
+        config_json:
+          $ref: "#/components/schemas/JsonObject"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    CreateKnowledgeBaseRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        embedding_model:
+          type: string
+        config:
+          $ref: "#/components/schemas/JsonObject"
+
+    KnowledgeBaseListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/KnowledgeBase"
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
+
+    DocumentStatus:
+      type: string
+      enum: [uploaded, parsing, chunking, embedding, indexed, failed, deleted]
+
+    Document:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        knowledge_base_id:
+          type: integer
+          format: int64
+        file_name:
+          type: string
+        file_type:
+          type: string
+        file_size:
+          type: integer
+          format: int64
+        status:
+          $ref: "#/components/schemas/DocumentStatus"
+        error_stage:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        metadata_json:
+          $ref: "#/components/schemas/JsonObject"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    UploadDocumentResponse:
+      type: object
+      properties:
+        document_id:
+          type: integer
+          format: int64
+        knowledge_base_id:
+          type: integer
+          format: int64
+        file_name:
+          type: string
+        status:
+          $ref: "#/components/schemas/DocumentStatus"
+        processing_job_id:
+          type: integer
+          format: int64
+
+    DocumentListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Document"
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
+
+    RetrieveKnowledgeRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+        top_k:
+          type: integer
+          default: 5
+        score_threshold:
+          type: number
+          format: float
+          default: 0.65
+
+    KnowledgeChunkResult:
+      type: object
+      properties:
+        chunk_id:
+          type: string
+        content:
+          type: string
+        score:
+          type: number
+        source:
+          $ref: "#/components/schemas/JsonObject"
+
+    RetrieveKnowledgeResponse:
+      type: object
+      properties:
+        chunks:
+          type: array
+          items:
+            $ref: "#/components/schemas/KnowledgeChunkResult"
+
+    Tool:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        type:
+          type: string
+          enum: [api]
+        description:
+          type: string
+        config_json:
+          $ref: "#/components/schemas/JsonObject"
+        status:
+          type: string
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    CreateToolRequest:
+      type: object
+      required: [name, type, config]
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [api]
+        description:
+          type: string
+        config:
+          $ref: "#/components/schemas/JsonObject"
+
+    ToolListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Tool"
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
+
+    TestToolRequest:
+      type: object
+      properties:
+        input:
+          $ref: "#/components/schemas/JsonObject"
+
+    TestToolResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        status_code:
+          type: integer
+        duration_ms:
+          type: integer
+        response:
+          nullable: true
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: array
+              items: {}
+            - type: string
+        error_message:
+          type: string
+          nullable: true
+
+    ModelProvider:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        provider_type:
+          type: string
+        status:
+          type: string
+
+    ModelConfig:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        provider_id:
+          type: integer
+          format: int64
+        model_name:
+          type: string
+        model_type:
+          type: string
+          enum: [chat, embedding, rerank]
+        display_name:
+          type: string
+        context_window:
+          type: integer
+          nullable: true
+        default_config:
+          $ref: "#/components/schemas/JsonObject"
+
+    Secret:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        secret_key:
+          type: string
+        display_name:
+          type: string
+        status:
+          type: string
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    CreateSecretRequest:
+      type: object
+      required: [secret_key, value]
+      properties:
+        secret_key:
+          type: string
+        display_name:
+          type: string
+        value:
+          type: string
+          format: password
+
+    UpdateSecretRequest:
+      type: object
+      properties:
+        display_name:
+          type: string
+        value:
+          type: string
+          format: password
+
+    NodeTypeSummary:
+      type: object
+      properties:
+        type:
+          $ref: "#/components/schemas/NodeType"
+        name:
+          type: string
+        category:
+          type: string
+        description:
+          type: string
+
+    NodeTypeSchema:
+      type: object
+      properties:
+        type:
+          $ref: "#/components/schemas/NodeType"
+        node_schema:
+          $ref: "#/components/schemas/JsonObject"
+        config_schema:
+          $ref: "#/components/schemas/JsonObject"
+        form_schema:
+          $ref: "#/components/schemas/JsonObject"

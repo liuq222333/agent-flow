@@ -1,0 +1,25 @@
+- generic [active] [ref=e1]:
+  - main [ref=e2]:
+    - complementary [ref=e3]:
+      - generic [ref=e4]:
+        - paragraph [ref=e5]: Agent Flow
+        - heading "工作流控制台" [level=1] [ref=e6]
+      - navigation [ref=e7]:
+        - generic [ref=e8]: 画布
+        - generic [ref=e9]: 运行记录
+        - generic [ref=e10]: 知识库
+        - generic [ref=e11]: 模型配置
+    - generic [ref=e12]:
+      - generic [ref=e13]:
+        - generic [ref=e14]:
+          - paragraph [ref=e15]: Local MVP Environment
+          - heading "环境骨架已就绪" [level=2] [ref=e16]
+        - link "API Health" [ref=e17] [cursor=pointer]:
+          - /url: http://localhost:8000/api/v1/health
+      - generic [ref=e18]:
+        - generic [ref=e19]: Start
+        - generic [ref=e21]: Input
+        - generic [ref=e23]: LLM
+        - generic [ref=e25]: Output
+        - generic [ref=e27]: End
+  - alert [ref=e28]

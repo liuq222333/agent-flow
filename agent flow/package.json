@@ -1,0 +1,18 @@
+{
+  "name": "agent-flow-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "compose:config": "docker compose config",
+    "compose:infra": "docker compose up -d postgres redis",
+    "db:migrate": "powershell -ExecutionPolicy Bypass -File scripts/migrate-db.ps1",
+    "compose:up": "docker compose up -d postgres redis && powershell -ExecutionPolicy Bypass -File scripts/migrate-db.ps1 && docker compose up -d api frontend worker-workflow worker-document",
+    "compose:ps": "docker compose ps",
+    "compose:logs": "docker compose logs -f",
+    "compose:down": "docker compose down",
+    "check:local": "powershell -ExecutionPolicy Bypass -File scripts/check-local.ps1",
+    "smoke:e2e": "powershell -ExecutionPolicy Bypass -File scripts/smoke-e2e.ps1",
+    "api:dev": "cd backend && uvicorn app.main:app --reload --reload-exclude generated_workflows/** --reload-exclude backend/generated_workflows/** --host 0.0.0.0 --port 8000",
+    "web:dev": "cd frontend && npm run dev -- --hostname 0.0.0.0 --port 3000"
+  }
+}

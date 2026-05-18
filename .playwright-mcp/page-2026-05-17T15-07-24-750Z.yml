@@ -1,0 +1,220 @@
+- generic [active] [ref=e1]:
+  - main [ref=e2]:
+    - complementary [ref=e3]:
+      - generic [ref=e4]:
+        - paragraph [ref=e5]: Agent Flow
+        - heading "工作流控制台" [level=1] [ref=e6]
+      - navigation "管理入口" [ref=e7]:
+        - button "Workflow" [ref=e8] [cursor=pointer]:
+          - img [ref=e9]
+          - generic [ref=e13]: Workflow
+        - button "Knowledge" [ref=e14] [cursor=pointer]:
+          - img [ref=e15]
+          - generic [ref=e17]: Knowledge
+        - button "Tools" [ref=e18] [cursor=pointer]:
+          - img [ref=e19]
+          - generic [ref=e21]: Tools
+        - button "Secrets" [ref=e22] [cursor=pointer]:
+          - img [ref=e23]
+          - generic [ref=e26]: Secrets
+        - button "Models" [ref=e27] [cursor=pointer]:
+          - img [ref=e28]
+          - generic [ref=e31]: Models
+      - generic [ref=e32]:
+        - button "新建" [ref=e33] [cursor=pointer]:
+          - img [ref=e34]
+          - text: 新建
+        - button "刷新" [ref=e35] [cursor=pointer]:
+          - img [ref=e36]
+          - text: 刷新
+        - button "知识库示例" [ref=e41] [cursor=pointer]:
+          - img [ref=e42]
+          - text: 知识库示例
+      - generic [ref=e46]:
+        - generic [ref=e47]:
+          - img [ref=e48]
+          - text: 节点库
+        - generic [ref=e49]:
+          - paragraph [ref=e50]: 输入输出
+          - generic [ref=e51]:
+            - button "开始" [ref=e52] [cursor=pointer]:
+              - img [ref=e53]
+              - generic [ref=e56]: 开始
+            - button "用户输入" [ref=e57] [cursor=pointer]:
+              - img [ref=e58]
+              - generic [ref=e63]: 用户输入
+            - button "最终输出" [ref=e64] [cursor=pointer]:
+              - img [ref=e65]
+              - generic [ref=e68]: 最终输出
+            - button "结束" [ref=e69] [cursor=pointer]:
+              - img [ref=e70]
+              - generic [ref=e73]: 结束
+        - generic [ref=e74]:
+          - paragraph [ref=e75]: AI
+          - generic [ref=e76]:
+            - button "生成回答" [ref=e77] [cursor=pointer]:
+              - img [ref=e78]
+              - generic [ref=e81]: 生成回答
+            - button "识别意图" [ref=e82] [cursor=pointer]:
+              - img [ref=e83]
+              - generic [ref=e86]: 识别意图
+        - generic [ref=e87]:
+          - paragraph [ref=e88]: 知识
+          - button "检索知识库" [ref=e90] [cursor=pointer]:
+            - img [ref=e91]
+            - generic [ref=e95]: 检索知识库
+        - generic [ref=e96]:
+          - paragraph [ref=e97]: 控制流
+          - button "条件分支" [ref=e99] [cursor=pointer]:
+            - img [ref=e100]
+            - generic [ref=e104]: 条件分支
+        - generic [ref=e105]:
+          - paragraph [ref=e106]: 工具
+          - button "调用 API" [ref=e108] [cursor=pointer]:
+            - img [ref=e109]
+            - generic [ref=e112]: 调用 API
+        - generic [ref=e113]:
+          - paragraph [ref=e114]: 消息
+          - button "回复消息" [ref=e116] [cursor=pointer]:
+            - img [ref=e117]
+            - generic [ref=e119]: 回复消息
+      - navigation [ref=e120]:
+        - button "Smoke KB Runtime 0fb7ab3e published" [ref=e121] [cursor=pointer]:
+          - generic [ref=e122]: Smoke KB Runtime 0fb7ab3e
+          - generic [ref=e123]: published
+        - button "Smoke Mock 0fb7ab3e published" [ref=e124] [cursor=pointer]:
+          - generic [ref=e125]: Smoke Mock 0fb7ab3e
+          - generic [ref=e126]: published
+        - button "Smoke KB Runtime 31ac9bc4 published" [ref=e127] [cursor=pointer]:
+          - generic [ref=e128]: Smoke KB Runtime 31ac9bc4
+          - generic [ref=e129]: published
+        - button "Smoke Mock 31ac9bc4 published" [ref=e130] [cursor=pointer]:
+          - generic [ref=e131]: Smoke Mock 31ac9bc4
+          - generic [ref=e132]: published
+        - button "Smoke KB Runtime ae62b944 published" [ref=e133] [cursor=pointer]:
+          - generic [ref=e134]: Smoke KB Runtime ae62b944
+          - generic [ref=e135]: published
+        - button "Smoke Mock ae62b944 published" [ref=e136] [cursor=pointer]:
+          - generic [ref=e137]: Smoke Mock ae62b944
+          - generic [ref=e138]: published
+        - button "Smoke KB Runtime b7a6adab published" [ref=e139] [cursor=pointer]:
+          - generic [ref=e140]: Smoke KB Runtime b7a6adab
+          - generic [ref=e141]: published
+        - button "Smoke Mock b7a6adab published" [ref=e142] [cursor=pointer]:
+          - generic [ref=e143]: Smoke Mock b7a6adab
+          - generic [ref=e144]: published
+        - button "Smoke Reload Exclude 33a073a3 published" [ref=e145] [cursor=pointer]:
+          - generic [ref=e146]: Smoke Reload Exclude 33a073a3
+          - generic [ref=e147]: published
+        - button "Smoke Reload Exclude 68bad9bc published" [ref=e148] [cursor=pointer]:
+          - generic [ref=e149]: Smoke Reload Exclude 68bad9bc
+          - generic [ref=e150]: published
+        - button "Smoke KB Runtime aea41acf published" [ref=e151] [cursor=pointer]:
+          - generic [ref=e152]: Smoke KB Runtime aea41acf
+          - generic [ref=e153]: published
+        - button "Smoke Mock aea41acf published" [ref=e154] [cursor=pointer]:
+          - generic [ref=e155]: Smoke Mock aea41acf
+          - generic [ref=e156]: published
+        - button "Smoke KB Runtime 6bb16bdd published" [ref=e157] [cursor=pointer]:
+          - generic [ref=e158]: Smoke KB Runtime 6bb16bdd
+          - generic [ref=e159]: published
+        - button "Smoke Mock 6bb16bdd published" [ref=e160] [cursor=pointer]:
+          - generic [ref=e161]: Smoke Mock 6bb16bdd
+          - generic [ref=e162]: published
+        - button "async smoke 20260517-212134 published" [ref=e163] [cursor=pointer]:
+          - generic [ref=e164]: async smoke 20260517-212134
+          - generic [ref=e165]: published
+        - button "codex smoke 20260517-210517 published" [ref=e166] [cursor=pointer]:
+          - generic [ref=e167]: codex smoke 20260517-210517
+          - generic [ref=e168]: published
+        - button "codex smoke 20260517-210237 draft" [ref=e169] [cursor=pointer]:
+          - generic [ref=e170]: codex smoke 20260517-210237
+          - generic [ref=e171]: draft
+        - button "E2E 本地闭环 published" [ref=e172] [cursor=pointer]:
+          - generic [ref=e173]: E2E 本地闭环
+          - generic [ref=e174]: published
+      - generic [ref=e175]: 工作流列表已同步
+    - generic [ref=e176]:
+      - generic [ref=e177]:
+        - generic [ref=e178]:
+          - paragraph [ref=e179]: Local MVP Runtime
+          - textbox "选择或新建工作流" [ref=e180]: Smoke KB Runtime 0fb7ab3e
+          - textbox "描述" [ref=e181]
+        - generic [ref=e182]:
+          - link "Health" [ref=e183] [cursor=pointer]:
+            - /url: http://localhost:8000/api/v1/health
+            - img [ref=e184]
+            - text: Health
+          - button "保存" [ref=e186] [cursor=pointer]:
+            - img [ref=e187]
+            - text: 保存
+          - button "校验" [ref=e191] [cursor=pointer]:
+            - img [ref=e192]
+            - text: 校验
+          - button "发布" [ref=e195] [cursor=pointer]:
+            - img [ref=e196]
+            - text: 发布
+          - button "发布并运行" [ref=e201] [cursor=pointer]:
+            - img [ref=e202]
+            - text: 发布并运行
+      - generic [ref=e204]:
+        - generic [ref=e205]:
+          - generic [ref=e206]: 状态
+          - strong [ref=e207]: published
+        - generic [ref=e208]:
+          - generic [ref=e209]: 版本
+          - strong [ref=e210]: v17
+        - generic [ref=e211]:
+          - generic [ref=e212]: 节点
+          - strong [ref=e213]: "5"
+        - generic [ref=e214]:
+          - generic [ref=e215]: 连线
+          - strong [ref=e216]: "4"
+        - generic [ref=e217]:
+          - generic [ref=e218]: 运行
+          - strong [ref=e219]: 尚未运行
+      - generic [ref=e220]:
+        - application [ref=e222]:
+          - img
+          - img "Mini Map" [ref=e226]
+          - generic "Control Panel" [ref=e227]:
+            - button "Zoom In" [ref=e228] [cursor=pointer]:
+              - img [ref=e229]
+            - button "Zoom Out" [ref=e231] [cursor=pointer]:
+              - img [ref=e232]
+            - button "Fit View" [ref=e234] [cursor=pointer]:
+              - img [ref=e235]
+            - button "Toggle Interactivity" [ref=e237] [cursor=pointer]:
+              - img [ref=e238]
+          - link "React Flow attribution" [ref=e241] [cursor=pointer]:
+            - /url: https://reactflow.dev
+            - text: React Flow
+        - complementary [ref=e243]:
+          - generic [ref=e244]:
+            - generic [ref=e245]:
+              - img [ref=e246]
+              - text: 节点配置
+            - paragraph [ref=e249]: 选择画布节点后编辑配置
+          - generic [ref=e250]:
+            - generic [ref=e251]:
+              - generic [ref=e252]: 测试输入 JSON
+              - generic "运行模式" [ref=e253]:
+                - button "sync" [ref=e254] [cursor=pointer]
+                - button "async" [ref=e255] [cursor=pointer]
+            - textbox "测试输入 JSON" [ref=e256]: "{ \"user_query\": \"我想申请退款\" }"
+            - button "运行" [ref=e257] [cursor=pointer]:
+              - img [ref=e258]
+              - text: 运行
+          - generic [ref=e260]:
+            - generic [ref=e261]:
+              - img [ref=e262]
+              - text: 校验结果
+            - paragraph [ref=e267]: 等待校验
+          - generic [ref=e268]:
+            - generic [ref=e269]:
+              - img [ref=e270]
+              - text: 运行 Trace
+            - paragraph [ref=e272]: 等待运行
+  - button "Open Next.js Dev Tools" [ref=e278] [cursor=pointer]:
+    - img [ref=e279]
+  - alert [ref=e282]

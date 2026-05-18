@@ -1,0 +1,10 @@
+[    5667ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ webpack-internal:///(app-pages-browser)/./node_modules/next/dist/compiled/react-dom/cjs/react-dom-client.development.js:25630
+[    5851ms] [ERROR] Access to fetch at 'http://localhost:8000/api/v1/workflows' from origin 'http://localhost:3001' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource. @ http://localhost:3001/:0
+[    5851ms] [ERROR] Failed to load resource: net::ERR_FAILED @ http://localhost:8000/api/v1/workflows:0
+[   13139ms] [ERROR] Access to fetch at 'http://localhost:8000/api/v1/knowledge-bases' from origin 'http://localhost:3001' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource. @ http://localhost:3001/:0
+[   13139ms] [ERROR] Failed to load resource: net::ERR_FAILED @ http://localhost:8000/api/v1/knowledge-bases:0
+[   26010ms] [ERROR] Access to fetch at 'http://localhost:8000/api/v1/tools?type=api' from origin 'http://localhost:3001' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource. @ http://localhost:3001/:0
+[   26010ms] [ERROR] Failed to load resource: net::ERR_FAILED @ http://localhost:8000/api/v1/tools?type=api:0
+[   30927ms] [ERROR] Access to fetch at 'http://localhost:8000/api/v1/secrets' from origin 'http://localhost:3001' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource. @ http://localhost:3001/:0
+[   30927ms] [ERROR] Failed to load resource: net::ERR_FAILED @ http://localhost:8000/api/v1/secrets:0
+[   30987ms] [VERBOSE] [DOM] Input elements should have autocomplete attributes (suggested: "current-password"): (More info: https://www.chromium.org/developers/design-documents/create-amazing-password-forms) %o @ http://localhost:3001/:0
