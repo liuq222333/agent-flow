@@ -10,9 +10,7 @@ from app.core.config import get_settings
 from app.infra.db.session import engine
 from app.services.audit import write_audit_log
 
-
 PENDING_STATUS = "pending"
-TERMINAL_STATUSES = {"approved", "rejected", "cancelled", "expired"}
 
 
 async def list_human_approval_tasks(
@@ -218,7 +216,10 @@ async def _get_task_row(conn: AsyncConnection, task_id: int) -> dict[str, Any]:
     )
     row = result.mappings().one_or_none()
     if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="human approval task not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="human approval task not found",
+        )
     return dict(row)
 
 
@@ -236,7 +237,10 @@ async def _get_task_row_for_update(conn: AsyncConnection, task_id: int) -> dict[
     )
     row = result.mappings().one_or_none()
     if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="human approval task not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="human approval task not found",
+        )
     return dict(row)
 
 

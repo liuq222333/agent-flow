@@ -19,6 +19,7 @@ tags:
   - name: Tools
   - name: Models
   - name: Secrets
+  - name: Human Approvals
   - name: Node Types
   - name: Ops
   - name: Health
@@ -475,6 +476,77 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RetryRunResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /human-approval-tasks:
+    get:
+      tags: [Human Approvals]
+      summary: List human approval tasks
+      description: Lists approval tasks created by Human Approval runtime checkpoints. Submitting a task records the decision but resume execution is not enabled in this minimal contract.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/HumanApprovalTaskStatus"
+        - name: workflow_id
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: run_id
+          in: query
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: Human approval task list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HumanApprovalTaskListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /human-approval-tasks/{task_id}:
+    get:
+      tags: [Human Approvals]
+      summary: Get human approval task
+      parameters:
+        - $ref: "#/components/parameters/HumanApprovalTaskId"
+      responses:
+        "200":
+          description: Human approval task detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HumanApprovalTask"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /human-approval-tasks/{task_id}/submit:
+    post:
+      tags: [Human Approvals]
+      summary: Submit a human approval decision
+      description: Marks a pending task approved or rejected. Runtime resume is intentionally documented as not yet supported.
+      parameters:
+        - $ref: "#/components/parameters/HumanApprovalTaskId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitHumanApprovalRequest"
+      responses:
+        "200":
+          description: Submitted human approval task
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HumanApprovalTask"
         default:
           $ref: "#/components/responses/ErrorResponse"
 
@@ -1074,6 +1146,13 @@ components:
       schema:
         type: integer
         format: int64
+    HumanApprovalTaskId:
+      name: task_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
     KnowledgeBaseId:
       name: kb_id
       in: path
@@ -1344,7 +1423,7 @@ components:
 
     WorkflowRunStatus:
       type: string
-      enum: [pending, running, completed, failed, cancelled]
+      enum: [pending, running, waiting_approval, completed, failed, cancelled]
 
     NodeRunStatus:
       type: string
@@ -1797,6 +1876,94 @@ components:
             retry_of_run_id:
               type: integer
               format: int64
+
+    HumanApprovalTaskStatus:
+      type: string
+      enum: [pending, approved, rejected, cancelled, expired]
+
+    HumanApprovalDecision:
+      type: string
+      enum: [approve, reject]
+
+    SubmitHumanApprovalRequest:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          $ref: "#/components/schemas/HumanApprovalDecision"
+        response:
+          $ref: "#/components/schemas/JsonObject"
+        comment:
+          type: string
+          maxLength: 1000
+          nullable: true
+
+    HumanApprovalTask:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        workflow_id:
+          type: integer
+          format: int64
+        run_id:
+          type: integer
+          format: int64
+        node_id:
+          type: string
+        node_name:
+          type: string
+          nullable: true
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        status:
+          $ref: "#/components/schemas/HumanApprovalTaskStatus"
+        decision:
+          $ref: "#/components/schemas/HumanApprovalDecision"
+          nullable: true
+        input_json:
+          $ref: "#/components/schemas/JsonObject"
+        response_json:
+          $ref: "#/components/schemas/JsonObject"
+        metadata_json:
+          $ref: "#/components/schemas/JsonObject"
+        resume_supported:
+          type: boolean
+          description: False in the current minimal contract.
+        requested_by:
+          type: integer
+          format: int64
+          nullable: true
+        decided_by:
+          type: integer
+          format: int64
+          nullable: true
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+        decided_at:
+          $ref: "#/components/schemas/Timestamp"
+        expires_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    HumanApprovalTaskListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/HumanApprovalTask"
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
 
     WorkflowRunDetail:
       type: object
