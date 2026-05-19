@@ -99,6 +99,9 @@ export function getDefaultNextNodeType(sourceType: NodeType): NodeType {
   if (sourceType === "intent" || sourceType === "branch") {
     return "llm";
   }
+  if (sourceType === "human_approval") {
+    return "branch";
+  }
   if (sourceType === "llm" || sourceType === "knowledge_base" || sourceType === "api") {
     return "message";
   }

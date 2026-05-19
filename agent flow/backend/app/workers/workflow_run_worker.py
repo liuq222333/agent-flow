@@ -440,7 +440,10 @@ async def recover_processing_workflow_run_jobs(
                     {"run_id": job.run_id},
                 )
 
-            if status_value in {"completed", "failed", "cancelled"} or status_value is None:
+            if (
+                status_value in {"completed", "failed", "cancelled", "waiting_approval"}
+                or status_value is None
+            ):
                 await client.lrem(WORKFLOW_RUN_PROCESSING_QUEUE, 1, job.raw)
                 acked_terminal.append(job.run_id)
                 continue

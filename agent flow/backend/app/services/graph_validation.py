@@ -11,6 +11,7 @@ ALLOWED_NODE_TYPES = {
     "knowledge_base",
     "intent",
     "branch",
+    "human_approval",
     "set_variable",
     "api",
     "message",
@@ -157,6 +158,8 @@ def validate_graph(graph: Graph, mode: ValidationMode) -> dict[str, Any]:
             _validate_api_node_config(node, path, errors)
         if mode in {"publish", "run"} and node_type == "set_variable":
             _validate_set_variable_node_config(node, path, errors)
+        if mode in {"publish", "run"} and node_type == "human_approval":
+            _validate_human_approval_node_config(node, path, errors)
 
     edge_ids: set[str] = set()
     outgoing: dict[str, list[str]] = defaultdict(list)
@@ -460,6 +463,42 @@ def _validate_set_variable_node_config(
             node_id,
         )
     )
+
+
+def _validate_human_approval_node_config(
+    node: dict[str, Any],
+    path: str,
+    errors: list[dict[str, Any]],
+) -> None:
+    node_id = node.get("id")
+    config = node.get("config") if isinstance(node.get("config"), dict) else {}
+    title = str(config.get("title") or "").strip()
+    if not title:
+        errors.append(
+            _issue(
+                "missing_human_approval_title",
+                "Human Approval Node 必须配置 title",
+                f"{path}.config.title",
+                node_id,
+            )
+        )
+
+    timeout_seconds = config.get("timeout_seconds")
+    if timeout_seconds is None or timeout_seconds == "":
+        return
+    try:
+        parsed = int(timeout_seconds)
+    except (TypeError, ValueError):
+        parsed = 0
+    if parsed < 1 or parsed > 604800:
+        errors.append(
+            _issue(
+                "invalid_human_approval_timeout",
+                "Human Approval Node timeout_seconds 必须在 1 到 604800 之间",
+                f"{path}.config.timeout_seconds",
+                node_id,
+            )
+        )
 
 
 def _validate_api_node_config(

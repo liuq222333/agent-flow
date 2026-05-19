@@ -291,11 +291,17 @@ async def test_recover_processing_jobs_requeues_pending_and_acks_terminal(
         job_id="wrj_running",
         enqueued_at_epoch=old_epoch,
     )
+    waiting = workflow_run_worker.encode_workflow_run_job(
+        4,
+        job_id="wrj_waiting",
+        enqueued_at_epoch=old_epoch,
+    )
     invalid = '{"run_id":0}'
     client.queues[workflow_run_worker.WORKFLOW_RUN_PROCESSING_QUEUE] = [
         terminal,
         pending,
         running,
+        waiting,
         invalid,
     ]
     monkeypatch.setattr(workflow_run_worker.redis, "from_url", lambda url: client)
@@ -303,7 +309,9 @@ async def test_recover_processing_jobs_requeues_pending_and_acks_terminal(
         workflow_run_worker,
         "engine",
         _WorkflowWorkerEngine(
-            _ProcessingRecoveryConnection({1: "completed", 2: "pending", 3: "running"})
+            _ProcessingRecoveryConnection(
+                {1: "completed", 2: "pending", 3: "running", 4: "waiting_approval"}
+            )
         ),
     )
     monkeypatch.setattr(workflow_run_worker.time, "time", lambda: old_epoch + 100)
@@ -315,7 +323,7 @@ async def test_recover_processing_jobs_requeues_pending_and_acks_terminal(
 
     assert result == {
         "requeued": [2],
-        "acked_terminal": [1],
+        "acked_terminal": [1, 4],
         "skipped_running": [3],
         "invalid_payloads": 1,
     }
@@ -451,6 +459,94 @@ async def test_execute_pending_generated_workflow_run_runs_published_code(
     assert run["metadata_json"]["code_hash_at_run"] == runtime._sha256_file(workflow_file)
     assert run["metadata_json"]["code_modified"] is False
     assert conn.node_runs[10]["output_json"] == {"message": "Hello Ada"}
+
+
+@pytest.mark.asyncio
+async def test_execute_pending_generated_workflow_run_resumes_after_human_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generated_root = tmp_path / "generated_workflows"
+    workflow_file = generated_root / "workflow_000001" / "v000001" / "workflow.py"
+    workflow_file.parent.mkdir(parents=True)
+    workflow_file.write_text(
+        "GRAPH = {\n"
+        "    'nodes': [\n"
+        "        {'id': 'start_1', 'type': 'start', 'name': 'Start', 'config': {}},\n"
+        "        {'id': 'approval_1', 'type': 'human_approval', 'name': 'Approval',\n"
+        "         'config': {'title': 'Approve'},\n"
+        "         'output_mapping': {'decision': 'variables.approval_decision'}},\n"
+        "        {'id': 'message_1', 'type': 'message', 'name': 'Message',\n"
+        "         'config': {'template': 'Decision {{ variables.approval_decision }}'}},\n"
+        "        {'id': 'output_1', 'type': 'output', 'name': 'Output',\n"
+        "         'config': {'outputs': {'message': '{{ outputs.message_1.message }}',\n"
+        "                                'decision': '{{ variables.approval_decision }}'}}},\n"
+        "    ],\n"
+        "    'edges': [\n"
+        "        {'id': 'e1', 'source': 'start_1', 'target': 'approval_1'},\n"
+        "        {'id': 'e2', 'source': 'approval_1', 'target': 'message_1'},\n"
+        "        {'id': 'e3', 'source': 'message_1', 'target': 'output_1'},\n"
+        "    ],\n"
+        "}\n"
+        "async def run(input_data, context):\n"
+        "    return await context.execute_graph(GRAPH, input_data)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime, "_GENERATED_ROOT", generated_root.resolve())
+
+    conn = _FakeConnection(
+        {
+            "id": 1,
+            "workflow_id": 1,
+            "version_id": 2,
+            "status": "pending",
+            "input_json": {"name": "Ada"},
+            "output_json": None,
+            "state_json": {
+                "input": {"name": "Ada"},
+                "variables": {},
+                "messages": [],
+                "outputs": {
+                    "approval_1": {
+                        "status": "approved",
+                        "task_id": 9,
+                        "decision": "approve",
+                        "approved": True,
+                        "response": {"approved": True},
+                        "comment": "ok",
+                    }
+                },
+                "metadata": {
+                    "run_id": 1,
+                    "workflow_id": 1,
+                    "version_id": 2,
+                    "waiting_approval": {
+                        "task_id": 9,
+                        "node_id": "approval_1",
+                        "next_node_id": "message_1",
+                    },
+                },
+                "path": ["start_1", "approval_1"],
+                "final_output": {},
+            },
+            "metadata_json": {
+                "execution_mode": "async",
+                "resuming_human_approval_task_id": 9,
+            },
+            "code_path": str(workflow_file),
+            "code_hash": runtime._sha256_file(workflow_file),
+        }
+    )
+
+    run = await runtime.execute_pending_generated_workflow_run(conn, run_id=1)
+
+    assert run["status"] == "completed"
+    assert run["output_json"] == {"message": "Decision approve", "decision": "approve"}
+    assert run["state_json"]["path"] == ["start_1", "approval_1", "message_1", "output_1"]
+    assert run["state_json"]["variables"]["approval_decision"] == "approve"
+    assert run["state_json"]["variables"]["last_human_approval"]["task_id"] == 9
+    assert "waiting_approval" not in run["state_json"]["metadata"]
+    assert conn.node_runs[10]["node_id"] == "message_1"
 
 
 class _RowsResult:

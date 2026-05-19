@@ -10,6 +10,7 @@ export type NodeType =
   | "knowledge_base"
   | "intent"
   | "branch"
+  | "human_approval"
   | "set_variable"
   | "api"
   | "message"
@@ -82,7 +83,7 @@ export type GeneratedWorkflowCleanupReport = {
   kept_total: number;
 };
 
-export type ActiveSection = "workflow" | "knowledge" | "tools" | "secrets" | "models" | "ops";
+export type ActiveSection = "workflow" | "approvals" | "knowledge" | "tools" | "secrets" | "models" | "ops";
 
 export type OpsQueue = JsonObject & {
   name?: string;
@@ -256,6 +257,29 @@ export type RunTrace = {
   nodes: NodeRun[];
   graph_json: WorkflowGraph;
 };
+
+export type HumanApprovalTask = {
+  id: number;
+  workflow_id: number;
+  run_id: number;
+  node_id: string;
+  node_name?: string | null;
+  title: string;
+  description?: string | null;
+  status: string;
+  decision?: "approve" | "reject" | null;
+  input_json?: JsonObject | null;
+  response_json?: JsonObject | null;
+  metadata_json?: JsonObject | null;
+  resume_supported?: boolean;
+  resume_enqueued?: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+  decided_at?: string | null;
+  expires_at?: string | null;
+};
+
+export type HumanApprovalTaskStatus = "pending" | "approved" | "rejected" | "cancelled" | "expired";
 
 export type RunListItem = {
   id?: number;

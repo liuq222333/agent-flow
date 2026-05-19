@@ -12,6 +12,7 @@ NODE_TYPE_ORDER = [
     "knowledge_base",
     "intent",
     "branch",
+    "human_approval",
     "set_variable",
     "api",
     "message",
@@ -55,6 +56,12 @@ NODE_TYPE_SUMMARIES: dict[str, dict[str, str]] = {
         "name": "条件分支",
         "category": "control",
         "description": "根据条件选择下一条执行路径。",
+    },
+    "human_approval": {
+        "type": "human_approval",
+        "name": "人工审批",
+        "category": "control",
+        "description": "执行到该节点时创建待审批任务，并暂停工作流。",
     },
     "set_variable": {
         "type": "set_variable",
@@ -247,6 +254,20 @@ CONFIG_SCHEMAS: dict[str, dict[str, Any]] = {
             }
         },
     },
+    "human_approval": {
+        "type": "object",
+        "required": ["title"],
+        "properties": {
+            "title": {"type": "string"},
+            "description": {"type": "string"},
+            "timeout_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 604800,
+            },
+            "approval_schema": {"type": "object", "additionalProperties": True},
+        },
+    },
     "api": {
         "type": "object",
         "required": ["method", "url"],
@@ -346,6 +367,11 @@ FORM_SCHEMAS: dict[str, dict[str, Any]] = {
             ("config.fallback_intent", "兜底意图", "input", False),
         ],
         "branch": [("config.branches", "分支", "branch_array", True)],
+        "human_approval": [
+            ("config.title", "审批标题", "input", True),
+            ("config.description", "审批说明", "textarea", False),
+            ("config.timeout_seconds", "超时秒数", "number", False),
+        ],
         "set_variable": [
             ("config.assignments", "变量赋值", "key_value", True),
         ],

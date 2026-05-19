@@ -20,7 +20,9 @@ import {
   SquareTerminal,
   Trash2,
   Upload,
+  UserCheck,
   Wrench,
+  XCircle,
 } from "lucide-react";
 import {
   Background,
@@ -75,6 +77,8 @@ import type {
   GeneratedWorkflowCleanupReport,
   GraphEdge,
   GraphNode,
+  HumanApprovalTask,
+  HumanApprovalTaskStatus,
   InspectorTab,
   JsonNodeField,
   JsonObject,
@@ -175,6 +179,24 @@ const readNumber = (record: JsonObject, keys: string[]) => {
   return 0;
 };
 
+const approvalStatusOptions: Array<HumanApprovalTaskStatus | "all"> = [
+  "pending",
+  "approved",
+  "rejected",
+  "cancelled",
+  "expired",
+  "all",
+];
+
+const approvalStatusLabels: Record<HumanApprovalTaskStatus | "all", string> = {
+  pending: "待处理",
+  approved: "已同意",
+  rejected: "已拒绝",
+  cancelled: "已取消",
+  expired: "已过期",
+  all: "全部",
+};
+
 export default function Home() {
   const [activeSection, setActiveSection] = useState<ActiveSection>("workflow");
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
@@ -212,6 +234,14 @@ export default function Home() {
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [trace, setTrace] = useState<RunTrace | null>(null);
   const [runs, setRuns] = useState<RunListItem[]>([]);
+  const [humanApprovalTasks, setHumanApprovalTasks] = useState<HumanApprovalTask[]>([]);
+  const [approvalCenterTasks, setApprovalCenterTasks] = useState<HumanApprovalTask[]>([]);
+  const [approvalCenterStatus, setApprovalCenterStatus] = useState<HumanApprovalTaskStatus | "all">("pending");
+  const [approvalCenterTotal, setApprovalCenterTotal] = useState(0);
+  const [approvalCenterError, setApprovalCenterError] = useState<string | null>(null);
+  const [approvalResponseDrafts, setApprovalResponseDrafts] = useState<Record<number, string>>({});
+  const [approvalCommentDrafts, setApprovalCommentDrafts] = useState<Record<number, string>>({});
+  const [approvalError, setApprovalError] = useState<string | null>(null);
   const [statusLine, setStatusLine] = useState("正在连接本地 API");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
@@ -921,6 +951,63 @@ export default function Home() {
     }
   }, []);
 
+  const seedApprovalDrafts = useCallback((tasks: HumanApprovalTask[]) => {
+    setApprovalResponseDrafts((drafts) => {
+      const nextDrafts = { ...drafts };
+      tasks.forEach((task) => {
+        if (!nextDrafts[task.id]) {
+          nextDrafts[task.id] = stringifyJson({});
+        }
+      });
+      return nextDrafts;
+    });
+    setApprovalCommentDrafts((drafts) => {
+      const nextDrafts = { ...drafts };
+      tasks.forEach((task) => {
+        if (!(task.id in nextDrafts)) {
+          nextDrafts[task.id] = "";
+        }
+      });
+      return nextDrafts;
+    });
+  }, []);
+
+  const loadApprovalCenterTasks = useCallback(async () => {
+    setBusyAction("approvals");
+    try {
+      const params = new URLSearchParams({ page_size: "50" });
+      if (approvalCenterStatus !== "all") {
+        params.set("status", approvalCenterStatus);
+      }
+      const response = await fetchWithTimeout(`${apiBaseUrl}/human-approval-tasks?${params.toString()}`, {
+        cache: "no-store",
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        const detail = data && typeof data === "object" ? (data as { detail?: unknown }).detail : null;
+        const message =
+          typeof detail === "string"
+            ? detail
+            : detail && typeof detail === "object" && "message" in detail
+              ? String((detail as { message?: unknown }).message)
+              : `GET /human-approval-tasks ${response.status}`;
+        throw new Error(message);
+      }
+      const tasks = extractItems<HumanApprovalTask>(data, ["items"]);
+      setApprovalCenterTasks(tasks);
+      setApprovalCenterTotal(extractNumber(data, ["total", "count"]) ?? tasks.length);
+      seedApprovalDrafts(tasks.filter((task) => task.status === "pending"));
+      setApprovalCenterError(null);
+      setStatusLine(`审批任务已同步：${tasks.length} / ${extractNumber(data, ["total", "count"]) ?? tasks.length}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "审批任务同步失败";
+      setApprovalCenterError(message);
+      setStatusLine(message);
+    } finally {
+      setBusyAction(null);
+    }
+  }, [approvalCenterStatus, seedApprovalDrafts]);
+
   const recoverWorkflowRunsQueue = async () => {
     setBusyAction("ops-recover");
     try {
@@ -980,10 +1067,13 @@ export default function Home() {
     if (activeSection === "models") {
       void loadModels();
     }
+    if (activeSection === "approvals") {
+      void loadApprovalCenterTasks();
+    }
     if (activeSection === "ops") {
       void loadOps();
     }
-  }, [activeSection, loadKnowledge, loadModels, loadOps, loadSecrets, loadTools]);
+  }, [activeSection, loadApprovalCenterTasks, loadKnowledge, loadModels, loadOps, loadSecrets, loadTools]);
 
   useEffect(() => {
     if (activeSection !== "knowledge" || !selectedKnowledgeBaseId || !hasProcessingKnowledgeDocuments) {
@@ -1641,6 +1731,41 @@ export default function Home() {
     [flowInstance, graph.nodes],
   );
 
+  const loadPendingApprovalTasks = useCallback(async (runId: number) => {
+    const response = await fetchWithTimeout(
+      `${apiBaseUrl}/human-approval-tasks?run_id=${runId}&status=pending&page_size=20`,
+      { cache: "no-store" },
+    );
+    const data = await response.json();
+    if (!response.ok) {
+      const detail = data && typeof data === "object" ? (data as { detail?: unknown }).detail : null;
+      const message =
+        typeof detail === "string"
+          ? detail
+          : detail && typeof detail === "object" && "message" in detail
+            ? String((detail as { message?: unknown }).message)
+            : `GET /human-approval-tasks ${response.status}`;
+      throw new Error(message);
+    }
+    const tasks = extractItems<HumanApprovalTask>(data, ["items"]);
+    setHumanApprovalTasks(tasks);
+    seedApprovalDrafts(tasks);
+    setApprovalError(null);
+  }, [seedApprovalDrafts]);
+
+  useEffect(() => {
+    const runId = trace ? getRunId(trace.run) : null;
+    if (!runId || trace?.run.status !== "waiting_approval") {
+      setHumanApprovalTasks([]);
+      setApprovalError(null);
+      return;
+    }
+
+    void loadPendingApprovalTasks(runId).catch((error) => {
+      setApprovalError(error instanceof Error ? error.message : "待审批任务载入失败");
+    });
+  }, [loadPendingApprovalTasks, trace]);
+
   const loadRunTrace = async (runId: number) => {
     setBusyAction("trace");
     try {
@@ -1650,7 +1775,7 @@ export default function Home() {
       }
       const nextTrace = (await traceResponse.json()) as RunTrace;
       setTrace(nextTrace);
-      setInspectorTab("trace");
+      setInspectorTab(nextTrace.run.status === "waiting_approval" ? "run" : "trace");
       setStatusLine(`已载入运行 #${runId} · ${nextTrace.run.status}`);
       const firstFailedNode = nextTrace.nodes.find((node) => node.status === "failed");
       if (firstFailedNode) {
@@ -1894,6 +2019,82 @@ export default function Home() {
     throw new Error(`异步运行 #${runId} 轮询超时`);
   };
 
+  const submitHumanApprovalTask = async (
+    task: HumanApprovalTask,
+    decision: "approve" | "reject",
+    options: { waitForRun?: boolean } = {},
+  ) => {
+    const parsedResponse = parseJsonObject(
+      approvalResponseDrafts[task.id] ?? stringifyJson({ approved: decision === "approve" }),
+    );
+    if (parsedResponse.error) {
+      setApprovalError(parsedResponse.error);
+      setStatusLine("审批响应不是合法 JSON 对象");
+      return false;
+    }
+
+    setBusyAction(`approval-${decision}-${task.id}`);
+    setApprovalError(null);
+    try {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/human-approval-tasks/${task.id}/submit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          decision,
+          response: parsedResponse.value ?? {},
+          comment: approvalCommentDrafts[task.id]?.trim() || null,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        const detail = result && typeof result === "object" ? (result as { detail?: unknown }).detail : null;
+        const message =
+          typeof detail === "string"
+            ? detail
+            : detail && typeof detail === "object" && "message" in detail
+              ? String((detail as { message?: unknown }).message)
+              : `POST /human-approval-tasks/${task.id}/submit ${response.status}`;
+        throw new Error(message);
+      }
+
+      setHumanApprovalTasks((items) => items.filter((item) => item.id !== task.id));
+      setApprovalCenterTasks((items) => items.filter((item) => item.id !== task.id));
+      if (options.waitForRun ?? true) {
+        setStatusLine(`审批已提交：${decision === "approve" ? "同意" : "拒绝"}，等待运行恢复`);
+        await pollRunUntilTerminal(task.run_id);
+
+        const traceResponse = await fetchWithTimeout(`${apiBaseUrl}/runs/${task.run_id}/trace`, { cache: "no-store" });
+        if (!traceResponse.ok) {
+          throw new Error(`GET /runs/${task.run_id}/trace ${traceResponse.status}`);
+        }
+        const nextTrace = (await traceResponse.json()) as RunTrace;
+        setTrace(nextTrace);
+        setInspectorTab(nextTrace.run.status === "waiting_approval" ? "run" : "trace");
+        setStatusLine(`审批后运行 #${task.run_id} · ${nextTrace.run.status}`);
+        const firstFailedNode = nextTrace.nodes.find((node) => node.status === "failed");
+        if (firstFailedNode) {
+          focusNode(firstFailedNode.node_id);
+        }
+      } else {
+        setStatusLine(`审批已提交：${decision === "approve" ? "同意" : "拒绝"}，运行已重新入队`);
+      }
+      if (activeSection === "approvals") {
+        await loadApprovalCenterTasks();
+      }
+      if (selectedWorkflow) {
+        await loadRuns(selectedWorkflow.id);
+      }
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "审批提交失败";
+      setApprovalError(message);
+      setStatusLine(message);
+      return false;
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const runWorkflow = async () => {
     if (!selectedWorkflow) {
       return false;
@@ -1952,7 +2153,7 @@ export default function Home() {
       }
       const nextTrace = (await traceResponse.json()) as RunTrace;
       setTrace(nextTrace);
-      setInspectorTab("trace");
+      setInspectorTab(nextTrace.run.status === "waiting_approval" ? "run" : "trace");
       setStatusLine(`${runMode === "async" ? "异步" : "同步"}运行完成 #${result.run_id} · ${nextTrace.run.status}`);
       const firstFailedNode = nextTrace.nodes.find((node) => node.status === "failed");
       if (firstFailedNode) {
@@ -2609,6 +2810,104 @@ export default function Home() {
                   </button>
                 </section>
 
+                {trace?.run.status === "waiting_approval" ? (
+                  <section className="approval-box">
+                    <div className="approval-box-header">
+                      <div className="section-heading">
+                        <UserCheck size={16} />
+                        待人工审批
+                      </div>
+                      <button
+                        className="text-button"
+                        onClick={() => {
+                          const runId = getRunId(trace.run);
+                          if (runId) {
+                            void loadPendingApprovalTasks(runId).catch((error) => {
+                              setApprovalError(error instanceof Error ? error.message : "待审批任务同步失败");
+                            });
+                          }
+                        }}
+                        disabled={busyAction !== null}
+                        type="button"
+                      >
+                        同步
+                      </button>
+                    </div>
+                    {approvalError ? <small className="error-text">{approvalError}</small> : null}
+                    {humanApprovalTasks.length > 0 ? (
+                      <div className="approval-list">
+                        {humanApprovalTasks.map((task) => (
+                          <article className="approval-card" key={task.id}>
+                            <div className="approval-card-header">
+                              <div>
+                                <strong>{task.title}</strong>
+                                <span>{task.node_name || task.node_id}</span>
+                              </div>
+                              <small>#{task.id} · {formatDate(task.created_at)}</small>
+                            </div>
+                            {task.description ? <p>{task.description}</p> : null}
+                            <label className="approval-field">
+                              <span>审批输入</span>
+                              <pre>{stringifyJson(task.input_json ?? {})}</pre>
+                            </label>
+                            <label className="approval-field" htmlFor={`approval-comment-${task.id}`}>
+                              <span>备注</span>
+                              <textarea
+                                id={`approval-comment-${task.id}`}
+                                value={approvalCommentDrafts[task.id] ?? ""}
+                                onChange={(event) =>
+                                  setApprovalCommentDrafts((drafts) => ({
+                                    ...drafts,
+                                    [task.id]: event.target.value,
+                                  }))
+                                }
+                                placeholder="可选"
+                              />
+                            </label>
+                            <label className="approval-field" htmlFor={`approval-response-${task.id}`}>
+                              <span>响应 JSON</span>
+                              <textarea
+                                id={`approval-response-${task.id}`}
+                                value={approvalResponseDrafts[task.id] ?? stringifyJson({})}
+                                onChange={(event) => {
+                                  setApprovalResponseDrafts((drafts) => ({
+                                    ...drafts,
+                                    [task.id]: event.target.value,
+                                  }));
+                                  setApprovalError(null);
+                                }}
+                                spellCheck={false}
+                              />
+                            </label>
+                            <div className="approval-actions">
+                              <button
+                                className="icon-button primary"
+                                type="button"
+                                onClick={() => void submitHumanApprovalTask(task, "approve")}
+                                disabled={busyAction !== null}
+                              >
+                                <CheckCircle2 size={16} />
+                                同意
+                              </button>
+                              <button
+                                className="icon-button danger"
+                                type="button"
+                                onClick={() => void submitHumanApprovalTask(task, "reject")}
+                                disabled={busyAction !== null}
+                              >
+                                <XCircle size={16} />
+                                拒绝
+                              </button>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="empty">当前运行正在等待审批任务同步</p>
+                    )}
+                  </section>
+                ) : null}
+
                 <section className="result-box">
                   <div className="result-box-header">
                     <div className="section-heading">
@@ -2652,6 +2951,130 @@ export default function Home() {
           </aside>
         </section>
           </>
+        ) : null}
+
+        {activeSection === "approvals" ? (
+          <section className="admin-page">
+            <AdminHeader
+              eyebrow="Approvals"
+              title="人工审批"
+              description="集中查看等待人工确认的 workflow run，并提交 approve/reject 让 worker 继续执行。"
+              onRefresh={() => void loadApprovalCenterTasks()}
+              busy={busyAction !== null}
+            />
+            <section className="admin-panel approval-center">
+              <div className="approval-toolbar">
+                <div className="segmented-control" aria-label="审批状态筛选">
+                  {approvalStatusOptions.map((status) => (
+                    <button
+                      className={approvalCenterStatus === status ? "active" : ""}
+                      key={status}
+                      type="button"
+                      onClick={() => setApprovalCenterStatus(status)}
+                    >
+                      {approvalStatusLabels[status]}
+                    </button>
+                  ))}
+                </div>
+                <span>{approvalCenterTotal} 条</span>
+              </div>
+              {approvalCenterError ? <small className="error-text">{approvalCenterError}</small> : null}
+              {approvalCenterTasks.length > 0 ? (
+                <div className="approval-list">
+                  {approvalCenterTasks.map((task) => {
+                    const statusLabel =
+                      approvalStatusLabels[task.status as HumanApprovalTaskStatus] ?? task.status ?? "-";
+                    return (
+                      <article className="approval-card" key={task.id}>
+                        <div className="approval-card-header">
+                          <div>
+                            <strong>{task.title}</strong>
+                            <span>
+                              workflow #{task.workflow_id} · run #{task.run_id} · {task.node_name || task.node_id}
+                            </span>
+                          </div>
+                          <small className={`approval-status approval-status-${task.status}`}>{statusLabel}</small>
+                        </div>
+                        {task.description ? <p>{task.description}</p> : null}
+                        <label className="approval-field">
+                          <span>审批输入</span>
+                          <pre>{stringifyJson(task.input_json ?? {})}</pre>
+                        </label>
+                        {task.status === "pending" ? (
+                          <>
+                            <label className="approval-field" htmlFor={`approval-center-comment-${task.id}`}>
+                              <span>备注</span>
+                              <textarea
+                                id={`approval-center-comment-${task.id}`}
+                                value={approvalCommentDrafts[task.id] ?? ""}
+                                onChange={(event) =>
+                                  setApprovalCommentDrafts((drafts) => ({
+                                    ...drafts,
+                                    [task.id]: event.target.value,
+                                  }))
+                                }
+                                placeholder="可选"
+                              />
+                            </label>
+                            <label className="approval-field" htmlFor={`approval-center-response-${task.id}`}>
+                              <span>响应 JSON</span>
+                              <textarea
+                                id={`approval-center-response-${task.id}`}
+                                value={approvalResponseDrafts[task.id] ?? stringifyJson({})}
+                                onChange={(event) => {
+                                  setApprovalResponseDrafts((drafts) => ({
+                                    ...drafts,
+                                    [task.id]: event.target.value,
+                                  }));
+                                  setApprovalCenterError(null);
+                                }}
+                                spellCheck={false}
+                              />
+                            </label>
+                            <div className="approval-actions">
+                              <button
+                                className="icon-button primary"
+                                type="button"
+                                onClick={() =>
+                                  void submitHumanApprovalTask(task, "approve", {
+                                    waitForRun: false,
+                                  })
+                                }
+                                disabled={busyAction !== null}
+                              >
+                                <CheckCircle2 size={16} />
+                                同意
+                              </button>
+                              <button
+                                className="icon-button danger"
+                                type="button"
+                                onClick={() =>
+                                  void submitHumanApprovalTask(task, "reject", {
+                                    waitForRun: false,
+                                  })
+                                }
+                                disabled={busyAction !== null}
+                              >
+                                <XCircle size={16} />
+                                拒绝
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <label className="approval-field">
+                            <span>审批结果</span>
+                            <pre>{stringifyJson(task.response_json ?? {})}</pre>
+                          </label>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="empty">暂无审批任务</p>
+              )}
+            </section>
+          </section>
         ) : null}
 
         {activeSection === "knowledge" ? (

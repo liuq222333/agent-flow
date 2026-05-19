@@ -483,7 +483,7 @@ paths:
     get:
       tags: [Human Approvals]
       summary: List human approval tasks
-      description: Lists approval tasks created by Human Approval runtime checkpoints. Submitting a task records the decision but resume execution is not enabled in this minimal contract.
+      description: Lists approval tasks created by Human Approval runtime checkpoints. Submitting a pending task records the decision, moves the run back to pending, and re-enqueues it for worker resume.
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/PageSize"
@@ -531,7 +531,7 @@ paths:
     post:
       tags: [Human Approvals]
       summary: Submit a human approval decision
-      description: Marks a pending task approved or rejected. Runtime resume is intentionally documented as not yet supported.
+      description: Marks a pending task approved or rejected, writes the approval output into workflow_runs.state_json, and re-enqueues the run to continue from the saved checkpoint.
       parameters:
         - $ref: "#/components/parameters/HumanApprovalTaskId"
       requestBody:
@@ -1427,11 +1427,11 @@ components:
 
     NodeRunStatus:
       type: string
-      enum: [running, success, failed, skipped, retrying]
+      enum: [running, success, failed, skipped, retrying, waiting_approval]
 
     NodeType:
       type: string
-      enum: [start, input, llm, knowledge_base, intent, branch, set_variable, api, message, output, end]
+      enum: [start, input, llm, knowledge_base, intent, branch, human_approval, set_variable, api, message, output, end]
 
     WorkflowGraph:
       type: object
@@ -1933,7 +1933,10 @@ components:
           $ref: "#/components/schemas/JsonObject"
         resume_supported:
           type: boolean
-          description: False in the current minimal contract.
+          description: True when the submitted task re-enqueues the workflow run for resume.
+        resume_enqueued:
+          type: boolean
+          description: True when the workflow run was pushed back to the worker queue.
         requested_by:
           type: integer
           format: int64

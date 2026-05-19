@@ -42,7 +42,8 @@ $migrations = @(
   "003_generated_workflow_code.sql",
   "004_worker_heartbeat_and_runtime_indexes.sql",
   "005_seed_deepseek_default_model.sql",
-  "006_human_approval_tasks.sql"
+  "006_human_approval_tasks.sql",
+  "007_human_approval_node_status.sql"
 )
 
 foreach ($migration in $migrations) {

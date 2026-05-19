@@ -19,6 +19,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Trash2,
+  UserCheck,
   Wrench,
   X,
   type LucideIcon,
@@ -1699,6 +1700,40 @@ export function StructuredNodeConfig({
           ))}
           {Object.keys(assignments).length === 0 ? <p className="empty">暂无变量赋值</p> : null}
         </div>
+      </section>
+    );
+  }
+
+  if (node.type === "human_approval") {
+    return (
+      <section className="structured-node-config">
+        <div className="node-subheading">
+          <UserCheck size={14} />
+          人工审批
+        </div>
+        <label>
+          <span>title</span>
+          <input
+            value={configString(config, "title", "人工审批")}
+            onChange={(event) => onConfigChange({ title: event.target.value })}
+          />
+        </label>
+        <label>
+          <span>description</span>
+          <textarea
+            value={configString(config, "description", "")}
+            onChange={(event) => onConfigChange({ description: event.target.value })}
+          />
+        </label>
+        <label>
+          <span>timeout_seconds</span>
+          <input
+            min={1}
+            type="number"
+            value={configNumber(config, "timeout_seconds", 3600)}
+            onChange={(event) => onConfigChange({ timeout_seconds: Number(event.target.value) })}
+          />
+        </label>
       </section>
     );
   }

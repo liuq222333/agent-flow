@@ -13,6 +13,7 @@ import {
   MessageSquare,
   SquareTerminal,
   TextCursorInput,
+  UserCheck,
   Variable,
   Wrench,
 } from "lucide-react";
@@ -98,6 +99,17 @@ export const nodeCatalog: NodeCatalogItem[] = [
   },
   { type: "branch", label: "条件分支", group: "控制流", Icon: GitBranch, config: { branches: [] } },
   {
+    type: "human_approval",
+    label: "人工审批",
+    group: "控制流",
+    Icon: UserCheck,
+    config: {
+      title: "人工审批",
+      description: "",
+      timeout_seconds: 3600,
+    },
+  },
+  {
     type: "set_variable",
     label: "变量赋值",
     group: "工具",
@@ -152,6 +164,7 @@ export const nodeJsonFieldLabels: Record<JsonNodeField, string> = {
 
 export const adminSections: Array<{ id: ActiveSection; label: string; Icon: typeof GitBranch }> = [
   { id: "workflow", label: "Workflow", Icon: GitBranch },
+  { id: "approvals", label: "Approvals", Icon: UserCheck },
   { id: "knowledge", label: "Knowledge", Icon: BookOpen },
   { id: "tools", label: "Tools", Icon: Wrench },
   { id: "secrets", label: "Secrets", Icon: KeyRound },

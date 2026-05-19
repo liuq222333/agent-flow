@@ -15,7 +15,8 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.services import generated_runtime, knowledge_processing
+from app.core.config import get_settings
+from app.services import generated_runtime, human_approvals, knowledge_processing
 from app.services.generated_runtime import GeneratedWorkflow, WorkflowCodeError
 from app.services.secrets import get_secret_value, resolve_deepseek_api_key, resolve_openai_api_key
 
@@ -45,6 +46,7 @@ _NODE_DEFAULT_TIMEOUT_SECONDS = {
     "api": 30.0,
     "intent": 30.0,
     "set_variable": 5.0,
+    "human_approval": 5.0,
 }
 _API_DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024
 _API_MAX_RESPONSE_BYTES = 5 * 1024 * 1024
@@ -71,6 +73,14 @@ class RuntimeNodeError(Exception):
         self.error_detail = error_detail or {}
 
 
+class HumanApprovalPause(Exception):
+    def __init__(self, *, node_id: str, task_id: int, output: dict[str, Any]) -> None:
+        super().__init__("workflow is waiting for human approval")
+        self.node_id = node_id
+        self.task_id = task_id
+        self.output = output
+
+
 class GeneratedWorkflowContext:
     def __init__(self, conn: AsyncConnection, *, run_id: int, state: State) -> None:
         self._conn = conn
@@ -79,7 +89,14 @@ class GeneratedWorkflowContext:
 
     async def execute_graph(self, graph: Graph, input_data: dict[str, Any]) -> dict[str, Any]:
         self.state["input"] = input_data
-        await _execute_graph(self._conn, run_id=self.run_id, graph=graph, state=self.state)
+        resume_from_node_id = _prepare_human_approval_resume(graph, self.state)
+        await _execute_graph(
+            self._conn,
+            run_id=self.run_id,
+            graph=graph,
+            state=self.state,
+            start_node_id=resume_from_node_id,
+        )
         return self.state.get("final_output") or _fallback_output(self.state)
 
     async def execute_node(
@@ -205,6 +222,8 @@ async def execute_generated_workflow_sync(
             ),
             {"run_id": run_id, "output_json": output, "state_json": state},
         )
+    except HumanApprovalPause:
+        pass
     except WorkflowCodeError as exc:
         await _mark_run_failed(conn, run_id, exc.code, str(exc), state)
     except Exception as exc:  # pragma: no cover - defensive runtime boundary
@@ -272,19 +291,7 @@ async def execute_pending_generated_workflow_run(
     if run["status"] not in {"pending", "running"}:
         return run
 
-    state: State = {
-        "input": run["input_json"] or {},
-        "variables": {},
-        "messages": [],
-        "outputs": {},
-        "metadata": {
-            "run_id": run_id,
-            "workflow_id": run["workflow_id"],
-            "version_id": run["version_id"],
-        },
-        "path": [],
-        "final_output": {},
-    }
+    state = _pending_run_state(run)
 
     try:
         generated = _load_generated_workflow(run.get("code_path"), run.get("code_hash"))
@@ -338,6 +345,8 @@ async def execute_pending_generated_workflow_run(
             ),
             {"run_id": run_id, "output_json": output, "state_json": state},
         )
+    except HumanApprovalPause:
+        pass
     except WorkflowCodeError as exc:
         await _mark_run_failed(conn, run_id, exc.code, str(exc), state)
     except Exception as exc:  # pragma: no cover - defensive runtime boundary
@@ -404,6 +413,8 @@ async def execute_workflow_sync(
             ),
             {"run_id": run_id, "output_json": output, "state_json": state},
         )
+    except HumanApprovalPause:
+        pass
     except Exception as exc:  # pragma: no cover - defensive runtime boundary
         error_code, error_message = _workflow_error_info(exc)
         await conn.execute(
@@ -441,6 +452,7 @@ async def _execute_graph(
     run_id: int,
     graph: Graph,
     state: State,
+    start_node_id: str | None = None,
 ) -> None:
     nodes = {node["id"]: node for node in graph.get("nodes", [])}
     outgoing: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -453,7 +465,12 @@ async def _execute_graph(
     if not start_nodes:
         raise ValueError("missing_start_node")
 
-    node_id = start_nodes[0]["id"]
+    if start_node_id == "":
+        return
+    if start_node_id is not None and start_node_id not in nodes:
+        raise ValueError(f"resume_node_missing:{start_node_id}")
+
+    node_id = start_node_id or start_nodes[0]["id"]
     visited_steps = 0
     max_steps = max(len(nodes) * 2, 1)
 
@@ -466,6 +483,14 @@ async def _execute_graph(
         state["path"].append(node_id)
         try:
             await _execute_node_with_retry(conn, run_id, node, state)
+        except HumanApprovalPause as pause:
+            state.setdefault("metadata", {})["waiting_approval"] = {
+                "task_id": pause.task_id,
+                "node_id": pause.node_id,
+                "next_node_id": _next_node_id(node, outgoing.get(node_id, []), state),
+            }
+            await _persist_run_state(conn, run_id, state)
+            raise
         except RuntimeNodeError as exc:
             node_id = await _next_node_after_error(
                 conn,
@@ -510,6 +535,17 @@ async def _execute_node_with_retry(
             await _mark_node_success(conn, node_run_id, output, duration_ms)
             await _persist_run_state(conn, run_id, state)
             return output
+        except HumanApprovalPause as pause:
+            state["outputs"][node["id"]] = pause.output
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            await _mark_node_waiting_approval(
+                conn,
+                node_run_id,
+                pause.output,
+                duration_ms,
+            )
+            await _persist_run_state(conn, run_id, state)
+            raise
         except Exception as exc:
             error = _normalize_node_error(exc, node)
             error.error_detail.setdefault("attempt", attempt)
@@ -883,6 +919,89 @@ def _workflow_error_info(exc: Exception) -> tuple[str, str]:
     return "unknown_error", str(exc) or exc.__class__.__name__
 
 
+def _pending_run_state(run: dict[str, Any]) -> State:
+    saved_state = run.get("state_json")
+    if isinstance(saved_state, dict) and _human_approval_waiting_checkpoint(saved_state):
+        state = dict(saved_state)
+        state.setdefault("variables", {})
+        state.setdefault("messages", [])
+        state.setdefault("outputs", {})
+        state.setdefault("path", [])
+        state.setdefault("final_output", {})
+        metadata = state.setdefault("metadata", {})
+        if isinstance(metadata, dict):
+            metadata["run_id"] = run["id"]
+            metadata["workflow_id"] = run["workflow_id"]
+            metadata["version_id"] = run["version_id"]
+        else:
+            state["metadata"] = {
+                "run_id": run["id"],
+                "workflow_id": run["workflow_id"],
+                "version_id": run["version_id"],
+            }
+        state["input"] = run.get("input_json") or state.get("input") or {}
+        return state
+
+    return {
+        "input": run["input_json"] or {},
+        "variables": {},
+        "messages": [],
+        "outputs": {},
+        "metadata": {
+            "run_id": run["id"],
+            "workflow_id": run["workflow_id"],
+            "version_id": run["version_id"],
+        },
+        "path": [],
+        "final_output": {},
+    }
+
+
+def _prepare_human_approval_resume(graph: Graph, state: State) -> str | None:
+    checkpoint = _human_approval_waiting_checkpoint(state)
+    if checkpoint is None:
+        return None
+
+    node_id = checkpoint.get("node_id")
+    task_id = checkpoint.get("task_id")
+    next_node_id = checkpoint.get("next_node_id")
+    if not isinstance(node_id, str) or not node_id:
+        return None
+    if next_node_id is not None and not isinstance(next_node_id, str):
+        return None
+
+    output = state.get("outputs", {}).get(node_id)
+    if not isinstance(output, dict) or output.get("decision") not in {"approve", "reject"}:
+        return None
+
+    node = next((item for item in graph.get("nodes", []) if item.get("id") == node_id), None)
+    if isinstance(node, dict):
+        _apply_output_mapping(node, output, state)
+
+    variables = state.setdefault("variables", {})
+    if isinstance(variables, dict):
+        variables["last_human_approval"] = output
+
+    metadata = state.setdefault("metadata", {})
+    if isinstance(metadata, dict):
+        metadata["last_human_approval"] = {
+            "task_id": task_id,
+            "node_id": node_id,
+            "decision": output.get("decision"),
+        }
+        metadata.pop("waiting_approval", None)
+
+    return next_node_id or ""
+
+
+def _human_approval_waiting_checkpoint(state: State) -> dict[str, Any] | None:
+    metadata = state.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    checkpoint = metadata.get("waiting_approval")
+    return checkpoint if isinstance(checkpoint, dict) else None
+
+
 def _build_node_input(node: dict[str, Any], state: State) -> dict[str, Any]:
     mapping = node.get("input_mapping") or {}
     if not mapping:
@@ -923,6 +1042,8 @@ async def _execute_node(
         if not selected:
             raise RuntimeNodeError("branch_no_match", "Branch node did not match any target")
         return {"selected": selected}
+    if node_type == "human_approval":
+        return await _execute_human_approval_node(conn, node, config, state, node_input)
     if node_type == "set_variable":
         return _execute_set_variable_node(config, state)
     if node_type == "output":
@@ -932,6 +1053,56 @@ async def _execute_node(
     if node_type == "end":
         return {"completed": True}
     raise RuntimeNodeError("invalid_config", f"unsupported node type: {node_type}")
+
+
+async def _execute_human_approval_node(
+    conn: AsyncConnection,
+    node: dict[str, Any],
+    config: dict[str, Any],
+    state: State,
+    node_input: dict[str, Any],
+) -> dict[str, Any]:
+    metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+    workflow_id = metadata.get("workflow_id")
+    run_id = metadata.get("run_id")
+    if not isinstance(workflow_id, int) or not isinstance(run_id, int):
+        raise RuntimeNodeError(
+            "invalid_config",
+            "human approval node requires workflow_id and run_id in runtime metadata",
+        )
+
+    title = str(config.get("title") or node.get("name") or "人工审批").strip()
+    if not title:
+        raise RuntimeNodeError("invalid_config", "human approval node requires title")
+    description = config.get("description")
+    description_text = None if description is None or description == "" else str(description)
+    approval_input = config.get("input", node_input)
+    if not isinstance(approval_input, dict):
+        approval_input = {"value": approval_input}
+
+    settings = get_settings()
+    task = await human_approvals.create_human_approval_task(
+        conn,
+        workflow_id=workflow_id,
+        run_id=run_id,
+        node_id=str(node["id"]),
+        node_name=node.get("name"),
+        title=title,
+        description=description_text,
+        input_json=approval_input,
+        requested_by=settings.mock_user_id,
+        metadata_json={
+            "approval_schema": config.get("approval_schema") or {},
+            "timeout_seconds": config.get("timeout_seconds"),
+        },
+    )
+    output = {
+        "status": "waiting_approval",
+        "task_id": task["id"],
+        "decision": None,
+        "resume_supported": False,
+    }
+    raise HumanApprovalPause(node_id=str(node["id"]), task_id=int(task["id"]), output=output)
 
 
 async def _execute_knowledge_base_node(
@@ -2245,6 +2416,40 @@ async def _mark_node_success(
             "output_json": output,
             "metadata_json": {
                 key: value for key, value in metadata_json.items() if value is not None
+            },
+            "duration_ms": duration_ms,
+        },
+    )
+
+
+async def _mark_node_waiting_approval(
+    conn: AsyncConnection,
+    node_run_id: int,
+    output: dict[str, Any],
+    duration_ms: int,
+) -> None:
+    await conn.execute(
+        _jsonb_stmt(
+            """
+            UPDATE node_runs
+            SET status = :status,
+                output_json = :output_json,
+                metadata_json = COALESCE(metadata_json, '{}'::jsonb) || :metadata_json,
+                duration_ms = :duration_ms
+            WHERE id = :node_run_id
+            """,
+            "output_json",
+            "metadata_json",
+        ),
+        {
+            "node_run_id": node_run_id,
+            "status": "waiting_approval",
+            "output_json": output,
+            "metadata_json": {
+                "runtime": "graph_runtime",
+                "duration_ms": duration_ms,
+                "approval_task_id": output.get("task_id"),
+                "resume_supported": output.get("resume_supported"),
             },
             "duration_ms": duration_ms,
         },

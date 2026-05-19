@@ -129,6 +129,71 @@ def test_publish_accepts_set_variable_node_with_assignments() -> None:
     assert result["valid"] is True
 
 
+def test_publish_accepts_human_approval_node_with_title() -> None:
+    graph = deepcopy(default_graph())
+    graph["nodes"].insert(
+        3,
+        {
+            "id": "approval_1",
+            "type": "human_approval",
+            "name": "人工审批",
+            "position": {"x": 620, "y": 160},
+            "config": {"title": "退款审批", "timeout_seconds": 3600},
+        },
+    )
+    graph["edges"] = [
+        {"id": "e1", "source": "start_1", "target": "input_1"},
+        {"id": "e2", "source": "input_1", "target": "llm_1"},
+        {"id": "e3", "source": "llm_1", "target": "approval_1"},
+        {"id": "e4", "source": "approval_1", "target": "output_1"},
+        {"id": "e5", "source": "output_1", "target": "end_1"},
+    ]
+
+    result = validate_graph(graph, "publish")
+
+    assert result["valid"] is True
+
+
+def test_publish_rejects_human_approval_node_without_title() -> None:
+    graph = deepcopy(default_graph())
+    graph["nodes"].append(
+        {
+            "id": "approval_1",
+            "type": "human_approval",
+            "name": "人工审批",
+            "position": {"x": 500, "y": 320},
+            "config": {"timeout_seconds": 3600},
+        }
+    )
+    graph["edges"].append({"id": "e5", "source": "llm_1", "target": "approval_1"})
+    graph["edges"][2] = {"id": "e3", "source": "approval_1", "target": "output_1"}
+
+    result = validate_graph(graph, "publish")
+
+    assert result["valid"] is False
+    assert any(error["code"] == "missing_human_approval_title" for error in result["errors"])
+
+
+def test_publish_rejects_human_approval_node_with_invalid_timeout() -> None:
+    graph = deepcopy(default_graph())
+    graph["nodes"].append(
+        {
+            "id": "approval_1",
+            "type": "human_approval",
+            "name": "人工审批",
+            "position": {"x": 500, "y": 320},
+            "config": {"title": "退款审批", "timeout_seconds": 0},
+        }
+    )
+    graph["edges"].append({"id": "e5", "source": "llm_1", "target": "approval_1"})
+    graph["edges"][2] = {"id": "e3", "source": "approval_1", "target": "output_1"}
+
+    result = validate_graph(graph, "publish")
+
+    assert result["valid"] is False
+    assert any(error["code"] == "invalid_human_approval_timeout" for error in result["errors"])
+
+
 def test_publish_rejects_set_variable_node_without_assignments() -> None:
     graph = deepcopy(default_graph())
     graph["nodes"].append(

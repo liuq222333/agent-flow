@@ -117,12 +117,38 @@ class _SubmitTaskConnection:
     def __init__(self, task: dict[str, Any]) -> None:
         self.task = task
         self.response_json: dict[str, Any] | None = None
+        self.run_state_json: dict[str, Any] | None = None
+        self.run_metadata_json: dict[str, Any] | None = None
+        self.run = {
+            "id": task["run_id"],
+            "status": "waiting_approval",
+            "state_json": {
+                "input": {"amount": 100},
+                "variables": {},
+                "outputs": {},
+                "metadata": {
+                    "waiting_approval": {
+                        "task_id": task["id"],
+                        "node_id": task["node_id"],
+                        "next_node_id": "output_1",
+                    }
+                },
+                "path": ["start_1", task["node_id"]],
+                "final_output": {},
+            },
+            "metadata_json": {
+                "waiting_approval_task_id": task["id"],
+                "waiting_approval_node_id": task["node_id"],
+            },
+        }
 
     async def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _FakeResult:
         sql = str(statement)
         params = params or {}
-        if "SELECT" in sql and "FOR UPDATE" in sql:
+        if "SELECT" in sql and "FROM human_approval_tasks" in sql and "FOR UPDATE" in sql:
             return _FakeResult(row=self.task)
+        if "SELECT" in sql and "FROM workflow_runs" in sql and "FOR UPDATE" in sql:
+            return _FakeResult(row=self.run)
         if "UPDATE human_approval_tasks" in sql:
             self.response_json = params["response_json"]
             updated = {
@@ -133,6 +159,13 @@ class _SubmitTaskConnection:
                 "decided_by": params["decided_by"],
             }
             return _FakeResult(row=updated)
+        if "UPDATE workflow_runs" in sql:
+            self.run_state_json = params["state_json"]
+            self.run_metadata_json = params["metadata_json"]
+            self.run["status"] = "pending"
+            self.run["state_json"] = params["state_json"]
+            self.run["metadata_json"] = params["metadata_json"]
+            return _FakeResult(row=self.run)
         raise AssertionError(f"unexpected SQL: {sql}")
 
 
@@ -144,8 +177,14 @@ async def test_submit_human_approval_task_marks_decision_and_audits(monkeypatch)
     async def fake_audit_log(_conn: Any, **kwargs: Any) -> None:
         audits.append(kwargs)
 
+    enqueued: list[int] = []
+
+    async def fake_enqueue(run_id: int) -> None:
+        enqueued.append(run_id)
+
     monkeypatch.setattr(human_approvals, "engine", _FakeEngine(conn))
     monkeypatch.setattr(human_approvals, "write_audit_log", fake_audit_log)
+    monkeypatch.setattr(human_approvals, "_enqueue_workflow_run", fake_enqueue)
 
     result = await human_approvals.submit_human_approval_task(
         9,
@@ -158,14 +197,30 @@ async def test_submit_human_approval_task_marks_decision_and_audits(monkeypatch)
 
     assert result["status"] == "approved"
     assert result["decision"] == "approve"
-    assert result["resume_supported"] is False
+    assert result["resume_supported"] is True
+    assert result["resume_enqueued"] is True
     assert conn.response_json == {
         "decision": "approve",
         "response": {"approved": True},
         "comment": "ok",
     }
+    assert conn.run_state_json is not None
+    assert conn.run_state_json["outputs"]["approval_1"] == {
+        "status": "approved",
+        "task_id": 9,
+        "decision": "approve",
+        "approved": True,
+        "response": {"approved": True},
+        "comment": "ok",
+    }
+    assert conn.run_metadata_json == {
+        "resuming_human_approval_task_id": 9,
+        "resuming_human_approval_node_id": "approval_1",
+        "resuming_human_approval_decision": "approve",
+    }
+    assert enqueued == [22]
     assert audits[0]["action"] == "human_approval.submit"
-    assert audits[0]["detail"]["resume_supported"] is False
+    assert audits[0]["detail"]["resume_supported"] is True
 
 
 @pytest.mark.asyncio

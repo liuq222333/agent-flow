@@ -21,6 +21,7 @@ class WorkflowNode(BaseModel):
         "knowledge_base",
         "intent",
         "branch",
+        "human_approval",
         "set_variable",
         "api",
         "message",

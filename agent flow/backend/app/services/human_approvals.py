@@ -77,6 +77,7 @@ async def submit_human_approval_task(
         "response": payload.response,
         "comment": payload.comment,
     }
+    resume_run_id: int | None = None
     async with engine.begin() as conn:
         task = await _get_task_row_for_update(conn, task_id)
         if task["status"] != PENDING_STATUS:
@@ -113,6 +114,12 @@ async def submit_human_approval_task(
             },
         )
         updated = dict(result.mappings().one())
+        await _resume_waiting_workflow_run(
+            conn,
+            task=updated,
+            approval_output=_approval_output(updated, response_json),
+        )
+        resume_run_id = int(updated["run_id"])
         await write_audit_log(
             conn,
             actor_user_id=settings.mock_user_id,
@@ -124,10 +131,12 @@ async def submit_human_approval_task(
                 "run_id": updated["run_id"],
                 "node_id": updated["node_id"],
                 "decision": payload.decision,
-                "resume_supported": False,
+                "resume_supported": True,
             },
         )
-        return {**updated, "resume_supported": False}
+    if resume_run_id is not None:
+        await _enqueue_workflow_run(resume_run_id)
+    return {**updated, "resume_supported": True, "resume_enqueued": resume_run_id is not None}
 
 
 async def create_human_approval_task(
@@ -207,6 +216,114 @@ async def create_human_approval_task(
         },
     )
     return task
+
+
+async def _resume_waiting_workflow_run(
+    conn: AsyncConnection,
+    *,
+    task: dict[str, Any],
+    approval_output: dict[str, Any],
+) -> None:
+    result = await conn.execute(
+        text(
+            """
+            SELECT id, status, state_json, metadata_json
+            FROM workflow_runs
+            WHERE id = :run_id
+            FOR UPDATE
+            """
+        ),
+        {"run_id": task["run_id"]},
+    )
+    row = result.mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="workflow run not found")
+    run = dict(row)
+    if run["status"] != "waiting_approval":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "human_approval_run_not_waiting",
+                "message": "workflow run is not waiting for approval",
+                "status": run["status"],
+            },
+        )
+
+    state_json = run.get("state_json")
+    state_payload = dict(state_json) if isinstance(state_json, dict) else {}
+    metadata = state_payload.get("metadata")
+    if not isinstance(metadata, dict):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "human_approval_checkpoint_missing",
+                "message": "workflow run approval checkpoint is missing",
+            },
+        )
+    checkpoint = metadata.get("waiting_approval")
+    if not isinstance(checkpoint, dict) or checkpoint.get("task_id") != task["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "human_approval_checkpoint_mismatch",
+                "message": "approval task does not match workflow run checkpoint",
+            },
+        )
+
+    outputs = state_payload.setdefault("outputs", {})
+    if not isinstance(outputs, dict):
+        outputs = {}
+        state_payload["outputs"] = outputs
+    outputs[task["node_id"]] = approval_output
+
+    run_metadata = dict(run.get("metadata_json") or {})
+    run_metadata.pop("waiting_approval_task_id", None)
+    run_metadata.pop("waiting_approval_node_id", None)
+    run_metadata.update(
+        {
+            "resuming_human_approval_task_id": task["id"],
+            "resuming_human_approval_node_id": task["node_id"],
+            "resuming_human_approval_decision": task["decision"],
+        }
+    )
+
+    await conn.execute(
+        _jsonb_stmt(
+            """
+            UPDATE workflow_runs
+            SET status = 'pending',
+                state_json = :state_json,
+                metadata_json = :metadata_json,
+                updated_at = now()
+            WHERE id = :run_id
+            """,
+            "state_json",
+            "metadata_json",
+        ),
+        {
+            "run_id": task["run_id"],
+            "state_json": state_payload,
+            "metadata_json": run_metadata,
+        },
+    )
+
+
+def _approval_output(task: dict[str, Any], response_json: dict[str, Any]) -> dict[str, Any]:
+    decision = response_json["decision"]
+    return {
+        "status": task["status"],
+        "task_id": task["id"],
+        "decision": decision,
+        "approved": decision == "approve",
+        "response": response_json["response"],
+        "comment": response_json["comment"],
+    }
+
+
+async def _enqueue_workflow_run(run_id: int) -> None:
+    from app.workers.workflow_run_worker import enqueue_workflow_run
+
+    await enqueue_workflow_run(run_id)
 
 
 async def _get_task_row(conn: AsyncConnection, task_id: int) -> dict[str, Any]:

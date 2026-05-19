@@ -24,6 +24,9 @@ class _MappingResult:
     def mappings(self):
         return self
 
+    def one(self):
+        return self.row
+
     def one_or_none(self):
         return self.row
 
@@ -54,6 +57,55 @@ class _FakeConnection:
             return _ScalarResult()
 
         return _ScalarResult()
+
+
+class _HumanApprovalConnection(_FakeConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.approval_task_input = None
+        self.approval_task_metadata = None
+        self.run_waiting_metadata = None
+        self.persisted_state = None
+
+    async def execute(self, statement, params=None):
+        sql = str(statement)
+        params = params or {}
+
+        if "INSERT INTO human_approval_tasks" in sql:
+            self.approval_task_input = params["input_json"]
+            self.approval_task_metadata = params["metadata_json"]
+            return _MappingResult(
+                {
+                    "id": 77,
+                    "workflow_id": params["workflow_id"],
+                    "run_id": params["run_id"],
+                    "node_id": params["node_id"],
+                    "node_name": params["node_name"],
+                    "title": params["title"],
+                    "description": params["description"],
+                    "status": "pending",
+                    "decision": None,
+                    "input_json": params["input_json"],
+                    "response_json": None,
+                    "metadata_json": params["metadata_json"],
+                    "requested_by": params["requested_by"],
+                    "decided_by": None,
+                    "created_at": None,
+                    "updated_at": None,
+                    "decided_at": None,
+                    "expires_at": None,
+                }
+            )
+
+        if "UPDATE workflow_runs" in sql and "status = 'waiting_approval'" in sql:
+            self.run_waiting_metadata = params["metadata_json"]
+            return _ScalarResult()
+
+        if "UPDATE workflow_runs" in sql and "state_json" in sql:
+            self.persisted_state = params["state_json"]
+            return _ScalarResult()
+
+        return await super().execute(statement, params)
 
 
 class _ModelConfigConnection(_FakeConnection):
@@ -1009,6 +1061,82 @@ async def test_message_graph_renders_template_and_maps_to_final_output() -> None
     }
     assert state["variables"]["customer_message"] == "Hi Ada, refund R-100 is queued."
     assert state["final_output"] == {"message": "Hi Ada, refund R-100 is queued."}
+
+
+@pytest.mark.asyncio
+async def test_human_approval_node_creates_task_and_pauses_graph() -> None:
+    state = {
+        "input": {"amount": 100},
+        "variables": {},
+        "outputs": {},
+        "metadata": {"run_id": 22, "workflow_id": 11, "version_id": 3},
+        "path": [],
+        "final_output": {},
+    }
+    graph = {
+        "nodes": [
+            {"id": "start_1", "type": "start", "name": "Start", "config": {}},
+            {
+                "id": "approval_1",
+                "type": "human_approval",
+                "name": "人工审批",
+                "config": {
+                    "title": "退款审批",
+                    "description": "金额 {{input.amount}}",
+                    "timeout_seconds": 3600,
+                    "approval_schema": {"required": ["approved"]},
+                },
+            },
+            {
+                "id": "output_1",
+                "type": "output",
+                "name": "Output",
+                "config": {"outputs": {"approved": True}},
+            },
+        ],
+        "edges": [
+            {"id": "e1", "source": "start_1", "target": "approval_1"},
+            {"id": "e2", "source": "approval_1", "target": "output_1"},
+        ],
+    }
+    conn = _HumanApprovalConnection()
+
+    with pytest.raises(runtime.HumanApprovalPause) as exc_info:
+        await runtime._execute_graph(conn, run_id=22, graph=graph, state=state)
+
+    assert exc_info.value.task_id == 77
+    assert state["path"] == ["start_1", "approval_1"]
+    assert "output_1" not in state["outputs"]
+    assert state["outputs"]["approval_1"] == {
+        "status": "waiting_approval",
+        "task_id": 77,
+        "decision": None,
+        "resume_supported": False,
+    }
+    assert state["metadata"]["waiting_approval"] == {
+        "task_id": 77,
+        "node_id": "approval_1",
+        "next_node_id": "output_1",
+    }
+    approval_run = next(
+        run for run in conn.node_runs.values() if run["node_id"] == "approval_1"
+    )
+    assert approval_run["status"] == "waiting_approval"
+    assert approval_run["output_json"]["task_id"] == 77
+    assert approval_run["metadata_json"]["approval_task_id"] == 77
+    assert conn.run_waiting_metadata == {
+        "waiting_approval_task_id": 77,
+        "waiting_approval_node_id": "approval_1",
+    }
+    assert conn.approval_task_input == {
+        "input": {"amount": 100},
+        "variables": {},
+    }
+    assert conn.approval_task_metadata == {
+        "approval_schema": {"required": ["approved"]},
+        "timeout_seconds": 3600,
+    }
+    assert conn.persisted_state == state
 
 
 @pytest.mark.asyncio
