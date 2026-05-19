@@ -2,7 +2,7 @@
 
 ## 1. 文档目标
 
-本文档定义 Agent 工作流平台 MVP 阶段的后端 API 接口，包括工作流、发布版本、运行记录、节点 Trace、知识库、文档、API 工具、模型配置、Secret 和节点类型 Schema。
+本文档定义 Agent 工作流平台 MVP 阶段的后端 API 接口，包括工作流、发布版本、运行记录、节点 Trace、知识库、文档、API 工具、模型配置、Secret、节点类型 Schema 和运行运维接口。
 
 API 设计目标：
 
@@ -1326,6 +1326,103 @@ GET /api/v1/node-types/{node_type}/schema
 
 ---
 
+## 9.5 Ops API
+
+Ops API 用于 MVP 阶段的异步运行观测和人工恢复，主要覆盖 workflow run 队列深度、worker 心跳、dead-letter 任务查看和恢复操作。
+
+### 9.5.1 获取 active worker
+
+```http
+GET /api/v1/ops/workers?active_seconds=120
+```
+
+响应：
+
+```json
+{
+  "workers": [
+    {
+      "worker_id": "workflow-worker:host:1234",
+      "worker_type": "workflow",
+      "queue_name": "workflow_runs",
+      "status": "idle",
+      "current_run_id": null,
+      "current_job_id": null,
+      "hostname": "host",
+      "pid": 1234,
+      "metadata_json": {},
+      "last_seen_at": "2026-05-19T10:19:48Z",
+      "last_seen_epoch": 1779166788
+    }
+  ],
+  "metadata": {
+    "table_exists": true,
+    "active_seconds": 120
+  }
+}
+```
+
+### 9.5.2 获取 workflow run 队列深度
+
+```http
+GET /api/v1/ops/queues
+```
+
+响应：
+
+```json
+{
+  "queue_name": "workflow_runs",
+  "main_depth": 0,
+  "processing_depth": 0,
+  "dead_letter_depth": 0
+}
+```
+
+### 9.5.3 查看 dead-letter 任务
+
+```http
+GET /api/v1/ops/queues/workflow_runs/dead?limit=20
+```
+
+响应：
+
+```json
+{
+  "queue_name": "workflow_runs",
+  "limit": 20,
+  "items": []
+}
+```
+
+### 9.5.4 恢复 workflow run 队列
+
+```http
+POST /api/v1/ops/queues/workflow_runs/recover
+```
+
+该接口会尝试恢复 processing 队列中的过期任务，并扫描长期停留在 `pending/running` 的异步运行记录。已完成或已取消的 processing 任务会被确认移除；过期的 pending 任务会重新入队；过期的 running 任务会标记失败并记录恢复元数据。
+
+响应：
+
+```json
+{
+  "processing_jobs": {
+    "requeued": [],
+    "acked_terminal": [],
+    "skipped_running": [],
+    "invalid_payloads": 0
+  },
+  "stale_workflow_runs": {
+    "requeued": [],
+    "failed": [],
+    "requeue_errors": []
+  }
+}
+```
+
+---
+
 ## 10. API 权限矩阵
 
 MVP 简化角色：
@@ -1366,13 +1463,14 @@ Editor
 2. Workflow validate / publish
 3. Workflow run
 4. Run detail / node-runs / trace
-5. Node types / schema
-6. Model configs
-7. Secrets
-8. Tools CRUD / test
-9. Knowledge base CRUD
-10. Documents upload / list / retry
-11. Knowledge retrieve test
+5. Ops queues / workers / recovery
+6. Node types / schema
+7. Model configs
+8. Secrets
+9. Tools CRUD / test
+10. Knowledge base CRUD
+11. Documents upload / list / retry
+12. Knowledge retrieve test
 ```
 
 ---

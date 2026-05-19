@@ -1,9 +1,0 @@
-{
-  "code_hash": "sha256:bb64347cfc8dfcd0e2653acff892825ff87c9040b6fef82b9a6fada86b10488e",
-  "entrypoint": "workflow.run",
-  "generated_at": "2026-05-17T14:09:32.113898+00:00",
-  "graph_hash": "007e38e0c76d431347c8d3d4f1f6ccba5277e4e480d5639a33c05fabe02a6f1b",
-  "schema_version": "1.0",
-  "version": 1,
-  "workflow_id": 16
-}

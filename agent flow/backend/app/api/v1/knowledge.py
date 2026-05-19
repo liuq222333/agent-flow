@@ -18,10 +18,18 @@ from app.services.knowledge_processing import retrieve_chunks
 router = APIRouter(tags=["knowledge"])
 rank_chunks = _rank_chunks
 
+DEFAULT_KNOWLEDGE_CONFIG = {
+    "chunk_size_tokens": 500,
+    "chunk_overlap_tokens": 80,
+    "embedding_provider": "local",
+}
+SUPPORTED_EMBEDDING_PROVIDERS = {"local", "openai"}
+
 
 @router.post("/knowledge-bases", status_code=status.HTTP_201_CREATED)
 async def create_knowledge_base(payload: CreateKnowledgeBaseRequest) -> dict[str, Any]:
     settings = get_settings()
+    config_json = _normalize_knowledge_config(payload.config)
     async with engine.begin() as conn:
         await _ensure_mock_user(conn, settings.mock_user_id)
         result = await conn.execute(
@@ -60,7 +68,7 @@ async def create_knowledge_base(payload: CreateKnowledgeBaseRequest) -> dict[str
                 "embedding_dim": payload.embedding_dim,
                 "tokenizer": payload.tokenizer,
                 "slug": payload.slug,
-                "config_json": payload.config,
+                "config_json": config_json,
                 "created_by": settings.mock_user_id,
             },
         )
@@ -83,25 +91,44 @@ async def list_knowledge_bases(
     page_size: int = 20,
 ) -> dict[str, Any]:
     page, page_size, offset = _pagination(page, page_size)
-    where = ["deleted_at IS NULL", "status != 'deleted'"]
+    where = ["kb.deleted_at IS NULL", "kb.status != 'deleted'"]
     params: dict[str, Any] = {"limit": page_size, "offset": offset}
     if keyword:
-        where.append("name ILIKE :keyword")
+        where.append("kb.name ILIKE :keyword")
         params["keyword"] = f"%{keyword}%"
     where_sql = " AND ".join(where)
 
     async with engine.connect() as conn:
         total = await conn.scalar(
-            text(f"SELECT count(*) FROM knowledge_bases WHERE {where_sql}"),
+            text(f"SELECT count(*) FROM knowledge_bases kb WHERE {where_sql}"),
             params,
         )
         result = await conn.execute(
             text(
                 f"""
-                SELECT *
-                FROM knowledge_bases
+                SELECT
+                  kb.*,
+                  COALESCE(doc_stats.document_count, 0) AS document_count,
+                  COALESCE(doc_stats.indexed_document_count, 0) AS indexed_document_count,
+                  COALESCE(chunk_stats.chunk_count, 0) AS chunk_count
+                FROM knowledge_bases kb
+                LEFT JOIN (
+                  SELECT
+                    knowledge_base_id,
+                    count(*) AS document_count,
+                    count(*) FILTER (WHERE status = 'indexed') AS indexed_document_count
+                  FROM documents
+                  WHERE deleted_at IS NULL
+                  GROUP BY knowledge_base_id
+                ) doc_stats ON doc_stats.knowledge_base_id = kb.id
+                LEFT JOIN (
+                  SELECT knowledge_base_id, count(*) AS chunk_count
+                  FROM knowledge_chunks
+                  WHERE status != 'deleted'
+                  GROUP BY knowledge_base_id
+                ) chunk_stats ON chunk_stats.knowledge_base_id = kb.id
                 WHERE {where_sql}
-                ORDER BY updated_at DESC, id DESC
+                ORDER BY kb.updated_at DESC, kb.id DESC
                 LIMIT :limit OFFSET :offset
                 """
             ),
@@ -332,6 +359,7 @@ async def retrieve_knowledge(kb_id: int, payload: RetrieveKnowledgeRequest) -> d
             query=payload.query,
             top_k=payload.top_k,
             score_threshold=payload.score_threshold,
+            context_budget_tokens=payload.context_budget_tokens,
         )
     return {"chunks": chunks}
 
@@ -340,9 +368,28 @@ async def _get_knowledge_base_row(conn, kb_id: int) -> dict[str, Any]:
     result = await conn.execute(
         text(
             """
-            SELECT *
-            FROM knowledge_bases
-            WHERE id = :kb_id AND deleted_at IS NULL AND status != 'deleted'
+            SELECT
+              kb.*,
+              COALESCE(doc_stats.document_count, 0) AS document_count,
+              COALESCE(doc_stats.indexed_document_count, 0) AS indexed_document_count,
+              COALESCE(chunk_stats.chunk_count, 0) AS chunk_count
+            FROM knowledge_bases kb
+            LEFT JOIN (
+              SELECT
+                knowledge_base_id,
+                count(*) AS document_count,
+                count(*) FILTER (WHERE status = 'indexed') AS indexed_document_count
+              FROM documents
+              WHERE deleted_at IS NULL
+              GROUP BY knowledge_base_id
+            ) doc_stats ON doc_stats.knowledge_base_id = kb.id
+            LEFT JOIN (
+              SELECT knowledge_base_id, count(*) AS chunk_count
+              FROM knowledge_chunks
+              WHERE status != 'deleted'
+              GROUP BY knowledge_base_id
+            ) chunk_stats ON chunk_stats.knowledge_base_id = kb.id
+            WHERE kb.id = :kb_id AND kb.deleted_at IS NULL AND kb.status != 'deleted'
             """
         ),
         {"kb_id": kb_id},
@@ -426,6 +473,62 @@ def _parse_metadata(metadata_json: str | None) -> dict[str, Any]:
             detail="metadata_json must be an object",
         )
     return value
+
+
+def _normalize_knowledge_config(config: dict[str, Any]) -> dict[str, Any]:
+    normalized = {**DEFAULT_KNOWLEDGE_CONFIG, **(config or {})}
+    chunk_size = _positive_int_config(normalized, "chunk_size_tokens")
+    chunk_overlap = _non_negative_int_config(normalized, "chunk_overlap_tokens")
+    if chunk_overlap >= chunk_size:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="chunk_overlap_tokens must be less than chunk_size_tokens",
+        )
+
+    provider = str(normalized.get("embedding_provider") or "local").strip().lower()
+    if provider == "local-hash":
+        provider = "local"
+    if provider not in SUPPORTED_EMBEDDING_PROVIDERS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"unsupported embedding_provider: {provider}",
+        )
+
+    # Store canonical KB-level processing settings so the worker and UI read one contract.
+    normalized["chunk_size_tokens"] = chunk_size
+    normalized["chunk_overlap_tokens"] = chunk_overlap
+    normalized["embedding_provider"] = provider
+    return normalized
+
+
+def _positive_int_config(config: dict[str, Any], key: str) -> int:
+    value = _int_config(config, key)
+    if value <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{key} must be greater than 0",
+        )
+    return value
+
+
+def _non_negative_int_config(config: dict[str, Any], key: str) -> int:
+    value = _int_config(config, key)
+    if value < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{key} must be greater than or equal to 0",
+        )
+    return value
+
+
+def _int_config(config: dict[str, Any], key: str) -> int:
+    try:
+        return int(config.get(key))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{key} must be an integer",
+        ) from exc
 
 
 def _validate_uploaded_file(

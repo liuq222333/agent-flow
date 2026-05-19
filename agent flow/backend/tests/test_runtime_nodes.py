@@ -14,6 +14,17 @@ class _ScalarResult:
         return self.value
 
 
+class _MappingResult:
+    def __init__(self, row=None) -> None:
+        self.row = row
+
+    def mappings(self):
+        return self
+
+    def one_or_none(self):
+        return self.row
+
+
 class _FakeConnection:
     def __init__(self) -> None:
         self._node_run_id = 1
@@ -29,6 +40,7 @@ class _FakeConnection:
             self.node_runs[node_run_id] = {
                 "node_id": params["node_id"],
                 "node_type": params["node_type"],
+                "attempt": params["attempt"],
                 "input_json": params["input_json"],
                 "metadata_json": params["metadata_json"],
             }
@@ -39,6 +51,40 @@ class _FakeConnection:
             return _ScalarResult()
 
         return _ScalarResult()
+
+
+class _ModelConfigConnection(_FakeConnection):
+    async def execute(self, statement, params=None):
+        sql = str(statement)
+        if "FROM model_configs" in sql:
+            return _MappingResult(
+                {
+                    "model_config_id": params["model_config_id"],
+                    "model_name": "configured-chat-model",
+                    "default_config_json": {"temperature": 0.7},
+                    "provider_type": "mock",
+                    "provider_base_url": None,
+                    "provider_config": {},
+                }
+            )
+        return await super().execute(statement, params)
+
+
+class _DeepSeekModelConfigConnection(_FakeConnection):
+    async def execute(self, statement, params=None):
+        sql = str(statement)
+        if "FROM model_configs" in sql:
+            return _MappingResult(
+                {
+                    "model_config_id": params["model_config_id"],
+                    "model_name": "deepseek-v4-flash",
+                    "default_config_json": {"temperature": 0.3},
+                    "provider_type": "deepseek",
+                    "provider_base_url": "https://api.deepseek.com",
+                    "provider_config": {"api_key_secret": "deepseek_api_key"},
+                }
+            )
+        return await super().execute(statement, params)
 
 
 def test_branch_selects_matching_condition_target() -> None:
@@ -108,6 +154,64 @@ async def test_branch_node_selects_matching_condition_target() -> None:
 
     output = await runtime._execute_node(_FakeConnection(), node, state, {})
     assert output == {"selected": "pro_path"}
+
+
+@pytest.mark.asyncio
+async def test_llm_node_can_bind_model_config_id() -> None:
+    state = {
+        "input": {"user_query": "hello"},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "llm_1",
+        "type": "llm",
+        "config": {
+            "model_config_id": 7,
+            "model": "fallback-model",
+            "user_prompt": "问题：{{input.user_query}}",
+        },
+    }
+
+    output = await runtime._execute_node(_ModelConfigConnection(), node, state, {})
+
+    assert output["provider"] == "mock"
+    assert output["model"] == "configured-chat-model"
+    assert output["model_config_id"] == 7
+
+
+@pytest.mark.asyncio
+async def test_llm_node_supports_deepseek_model_config_without_key(monkeypatch) -> None:
+    async def fake_deepseek_key(conn, provider_config):
+        assert provider_config == {"api_key_secret": "deepseek_api_key"}
+        return None
+
+    monkeypatch.setattr(runtime, "resolve_deepseek_api_key", fake_deepseek_key)
+    state = {
+        "input": {"user_query": "hello"},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "llm_1",
+        "type": "llm",
+        "config": {
+            "model_config_id": 11,
+            "user_prompt": "问题：{{input.user_query}}",
+        },
+    }
+
+    with pytest.raises(runtime.RuntimeNodeError) as exc_info:
+        await runtime._execute_node(_DeepSeekModelConfigConnection(), node, state, {})
+
+    assert exc_info.value.error_code == "permission_denied"
+    assert "provider=deepseek" in str(exc_info.value)
 
 
 def test_branch_uses_default_when_no_condition_matches() -> None:
@@ -334,6 +438,41 @@ async def test_knowledge_base_node_resolves_query_from_node_input(monkeypatch) -
     await runtime._execute_node(_FakeConnection(), node, state, node_input)
 
     assert calls == [(7, "refund policy", 3, 0.0)]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_base_node_applies_context_budget(monkeypatch) -> None:
+    state = {
+        "input": {"question": "refund policy"},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+
+    async def fake_retrieve(conn, *, knowledge_base_id, query, top_k, score_threshold):
+        return [
+            {"chunk_id": "1", "content": "alpha", "score": 0.9, "token_count": 3},
+            {"chunk_id": "2", "content": "beta", "score": 0.8, "token_count": 4},
+        ]
+
+    monkeypatch.setattr(runtime.knowledge_processing, "retrieve_chunks", fake_retrieve)
+    node = {
+        "id": "kb_1",
+        "type": "knowledge_base",
+        "config": {
+            "knowledge_base_ids": [7],
+            "query": "{{ input.question }}",
+            "top_k": 5,
+            "context_budget_tokens": 5,
+        },
+    }
+
+    output = await runtime._execute_node(_FakeConnection(), node, state, {})
+
+    assert [chunk["chunk_id"] for chunk in output["chunks"]] == ["1"]
+    assert output["returned_chunks"] == 1
 
 
 @pytest.mark.asyncio
@@ -586,3 +725,296 @@ async def test_message_graph_renders_template_and_maps_to_final_output() -> None
     }
     assert state["variables"]["customer_message"] == "Hi Ada, refund R-100 is queued."
     assert state["final_output"] == {"message": "Hi Ada, refund R-100 is queued."}
+
+
+@pytest.mark.asyncio
+async def test_retry_recreates_node_run_and_re_resolves_input_mapping(monkeypatch) -> None:
+    state = {
+        "input": {"name": "Ada"},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "api_1",
+        "type": "api",
+        "name": "API",
+        "input_mapping": {"name": "{{input.name}}"},
+        "output_mapping": {"result": "variables.result"},
+        "retry": {
+            "max_attempts": 2,
+            "backoff": "none",
+            "retry_on": ["api_request_error"],
+        },
+    }
+    calls = 0
+
+    async def fake_execute_node(conn, current_node, current_state, node_input):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            current_state["input"]["name"] = "Grace"
+            raise runtime.RuntimeNodeError(
+                "api_request_error",
+                "temporary outage",
+                retryable=True,
+            )
+        return {"result": node_input["name"]}
+
+    monkeypatch.setattr(runtime, "_execute_node", fake_execute_node)
+    conn = _FakeConnection()
+
+    output = await runtime._execute_node_with_retry(conn, 100, node, state)
+
+    assert output == {"result": "Grace"}
+    assert state["variables"]["result"] == "Grace"
+    assert [run["attempt"] for run in conn.node_runs.values()] == [1, 2]
+    first_run, second_run = conn.node_runs.values()
+    assert first_run["status"] == "retrying"
+    assert first_run["error_code"] == "api_request_error"
+    assert first_run["metadata_json"]["will_retry"] is True
+    assert second_run["input_json"] == {"name": "Grace"}
+
+
+@pytest.mark.asyncio
+async def test_node_timeout_records_stable_error_code(monkeypatch) -> None:
+    state = {
+        "input": {},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {"id": "slow_1", "type": "message", "timeout": 0.001, "config": {}}
+
+    async def slow_execute_node(conn, current_node, current_state, node_input):
+        await runtime.asyncio.sleep(0.05)
+        return {"message": "too late"}
+
+    monkeypatch.setattr(runtime, "_execute_node", slow_execute_node)
+    conn = _FakeConnection()
+
+    with pytest.raises(runtime.RuntimeNodeError) as exc_info:
+        await runtime._execute_node_with_retry(conn, 100, node, state)
+
+    assert exc_info.value.error_code == "timeout"
+    node_run = next(iter(conn.node_runs.values()))
+    assert node_run["error_code"] == "timeout"
+    assert node_run["metadata_json"]["retryable"] is True
+
+
+@pytest.mark.asyncio
+async def test_missing_variable_fails_with_stable_error_code() -> None:
+    state = {
+        "input": {},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    graph = {
+        "nodes": [
+            {"id": "start_1", "type": "start", "name": "Start", "config": {}},
+            {
+                "id": "message_1",
+                "type": "message",
+                "name": "Message",
+                "config": {"template": "Hi {{input.name}}"},
+            },
+        ],
+        "edges": [{"id": "e1", "source": "start_1", "target": "message_1"}],
+    }
+    conn = _FakeConnection()
+
+    with pytest.raises(runtime.RuntimeNodeError) as exc_info:
+        await runtime._execute_graph(conn, run_id=100, graph=graph, state=state)
+
+    assert exc_info.value.error_code == "variable_not_found"
+    message_run = [run for run in conn.node_runs.values() if run["node_id"] == "message_1"][0]
+    assert message_run["error_code"] == "variable_not_found"
+
+
+def test_output_mapping_supports_outputs_and_messages_destinations() -> None:
+    state = {
+        "input": {},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "messages": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "message_1",
+        "type": "message",
+        "output_mapping": {
+            "payload": "outputs",
+            "detail": "outputs.detail",
+            "messages": "messages",
+        },
+    }
+    output = {
+        "payload": {"ok": True},
+        "detail": {"id": 7},
+        "messages": ["one", {"type": "text", "content": "two"}],
+    }
+
+    runtime._apply_output_mapping(node, output, state)
+
+    assert state["outputs"] == {"ok": True, "detail": {"id": 7}}
+    assert state["messages"] == [
+        {"type": "text", "content": "one"},
+        {"type": "text", "content": "two"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_on_error_skip_node_continues_to_next_node(monkeypatch) -> None:
+    state = {
+        "input": {},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    graph = {
+        "nodes": [
+            {"id": "start_1", "type": "start", "name": "Start", "config": {}},
+            {
+                "id": "api_1",
+                "type": "api",
+                "name": "API",
+                "config": {},
+                "on_error": {"strategy": "skip_node"},
+            },
+            {
+                "id": "message_1",
+                "type": "message",
+                "name": "Message",
+                "config": {"template": "fallback"},
+                "output_mapping": {"message": "variables.reply"},
+            },
+        ],
+        "edges": [
+            {"id": "e1", "source": "start_1", "target": "api_1"},
+            {"id": "e2", "source": "api_1", "target": "message_1"},
+        ],
+    }
+
+    async def fake_execute_node(conn, node, current_state, node_input):
+        if node["id"] == "api_1":
+            raise runtime.RuntimeNodeError("api_response_error", "HTTP 500", retryable=True)
+        return await original_execute_node(conn, node, current_state, node_input)
+
+    original_execute_node = runtime._execute_node
+    monkeypatch.setattr(runtime, "_execute_node", fake_execute_node)
+    conn = _FakeConnection()
+
+    await runtime._execute_graph(conn, run_id=100, graph=graph, state=state)
+
+    assert state["variables"]["reply"] == "fallback"
+    assert state["metadata"]["last_error"]["node_id"] == "api_1"
+    assert state["metadata"]["last_error"]["error_code"] == "api_response_error"
+    assert state["path"] == ["start_1", "api_1", "message_1"]
+
+
+@pytest.mark.asyncio
+async def test_on_error_go_to_node_jumps_to_error_handler(monkeypatch) -> None:
+    state = {
+        "input": {},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    graph = {
+        "nodes": [
+            {"id": "start_1", "type": "start", "name": "Start", "config": {}},
+            {
+                "id": "api_1",
+                "type": "api",
+                "name": "API",
+                "config": {},
+                "on_error": {"strategy": "go_to_node", "target": "error_message"},
+            },
+            {
+                "id": "success_message",
+                "type": "message",
+                "name": "Success",
+                "config": {"template": "success"},
+                "output_mapping": {"message": "variables.reply"},
+            },
+            {
+                "id": "error_message",
+                "type": "message",
+                "name": "Error",
+                "config": {"template": "handled {{metadata.last_error.error_code}}"},
+                "output_mapping": {"message": "variables.reply"},
+            },
+        ],
+        "edges": [
+            {"id": "e1", "source": "start_1", "target": "api_1"},
+            {"id": "e2", "source": "api_1", "target": "success_message"},
+        ],
+    }
+
+    async def fake_execute_node(conn, node, current_state, node_input):
+        if node["id"] == "api_1":
+            raise runtime.RuntimeNodeError("api_response_error", "HTTP 500", retryable=True)
+        return await original_execute_node(conn, node, current_state, node_input)
+
+    original_execute_node = runtime._execute_node
+    monkeypatch.setattr(runtime, "_execute_node", fake_execute_node)
+    conn = _FakeConnection()
+
+    await runtime._execute_graph(conn, run_id=100, graph=graph, state=state)
+
+    assert state["variables"]["reply"] == "handled api_response_error"
+    assert state["path"] == ["start_1", "api_1", "error_message"]
+
+
+def test_http_status_error_normalizes_to_retryable_rate_limit() -> None:
+    request = runtime.httpx.Request("GET", "https://api.example.test")
+    response = runtime.httpx.Response(429, request=request)
+    exc = runtime.httpx.HTTPStatusError("too many requests", request=request, response=response)
+
+    error = runtime._normalize_node_error(exc, {"type": "api"})
+
+    assert error.error_code == "rate_limit"
+    assert error.retryable is True
+    assert error.error_detail["status_code"] == 429
+
+
+@pytest.mark.asyncio
+async def test_api_mock_response_path_and_query_params_are_resolved() -> None:
+    state = {
+        "input": {"tenant": "acme"},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "api_1",
+        "type": "api",
+        "config": {
+            "mode": "mock",
+            "method": "GET",
+            "url": "https://api.example.test/orders",
+            "query_params": {"tenant": "{{input.tenant}}"},
+            "mock_response": {"data": {"result": {"ok": True}}},
+            "response_path": "data.result",
+        },
+    }
+
+    output = await runtime._execute_node(_FakeConnection(), node, state, {})
+
+    assert output["response"] == {"ok": True}
+    assert output["request"]["query_params"] == {"tenant": "acme"}

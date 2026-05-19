@@ -1,9 +1,8 @@
 import json
 import time
-import uuid
 import urllib.error
 import urllib.request
-
+import uuid
 
 BASE_URL = "http://localhost:8000/api/v1"
 
@@ -88,7 +87,12 @@ def mock_workflow_graph():
                 "output_1",
                 "output",
                 720,
-                {"outputs": {"answer": "{{variables.answer}}", "user_query": "{{input.user_query}}"}},
+                {
+                    "outputs": {
+                        "answer": "{{variables.answer}}",
+                        "user_query": "{{input.user_query}}",
+                    }
+                },
             ),
             node("end_1", "end", 920, {}),
         ],
@@ -122,10 +126,42 @@ def knowledge_workflow_graph(knowledge_base_id):
                 "input_mapping": {"question": "{{input.user_query}}"},
                 "output_mapping": {"chunks": "variables.kb_context"},
             },
-            node("output_1", "output", 720, {"outputs": {"chunks": "{{variables.kb_context}}"}}),
-            node("end_1", "end", 920, {}),
+            {
+                **node(
+                    "llm_1",
+                    "llm",
+                    720,
+                    {
+                        "provider": "mock",
+                        "model": "local-mock",
+                        "system_prompt": "You answer from retrieved knowledge chunks.",
+                        "user_prompt": (
+                            "Question: {{input.user_query}}\n"
+                            "Sources: {{variables.kb_context}}"
+                        ),
+                    },
+                ),
+                "input_mapping": {
+                    "question": "{{input.user_query}}",
+                    "context": "{{variables.kb_context}}",
+                },
+                "output_mapping": {"answer": "variables.answer"},
+            },
+            node(
+                "output_1",
+                "output",
+                940,
+                {
+                    "outputs": {
+                        "answer": "{{variables.answer}}",
+                        "sources": "{{variables.kb_context}}",
+                        "chunks": "{{variables.kb_context}}",
+                    }
+                },
+            ),
+            node("end_1", "end", 1160, {}),
         ],
-        "edges": linear_edges(["start_1", "input_1", "kb_1", "output_1", "end_1"]),
+        "edges": linear_edges(["start_1", "input_1", "kb_1", "llm_1", "output_1", "end_1"]),
     }
 
 
@@ -314,7 +350,9 @@ def api_message_workflow_graph(secret_key):
                         "message": "{{variables.message_text}}",
                         "api_status": "{{variables.api_status}}",
                         "api_request_body": "{{outputs.api_1.request.body}}",
-                        "api_authorization_header": "{{outputs.api_1.request.headers.Authorization}}",
+                        "api_authorization_header": (
+                            "{{outputs.api_1.request.headers.Authorization}}"
+                        ),
                     }
                 },
             ),
@@ -488,9 +526,12 @@ def main():
         {"release_note": "kb smoke"},
     )
     kb_run, _ = assert_completed_run(kb_workflow["id"], "sync", {"user_query": "refund billing"})
-    kb_chunks = kb_run.get("output_json", kb_run.get("output", {})).get("chunks") or []
+    kb_output = kb_run.get("output_json", kb_run.get("output", {}))
+    kb_chunks = kb_output.get("sources") or kb_output.get("chunks") or []
     if not kb_chunks:
         raise RuntimeError(f"knowledge workflow returned no chunks: {kb_run}")
+    if not kb_output.get("answer"):
+        raise RuntimeError(f"knowledge workflow returned no answer: {kb_run}")
 
     intent_workflow = request(
         "POST",

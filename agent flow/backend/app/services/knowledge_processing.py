@@ -12,9 +12,10 @@ from sqlalchemy.dialects.postgresql import JSONB
 from app.services.secrets import resolve_openai_api_key
 
 SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".json", ".csv", ".pdf", ".docx"}
-DEFAULT_CHUNK_SIZE = 1200
-DEFAULT_CHUNK_OVERLAP = 160
+DEFAULT_CHUNK_SIZE = 500
+DEFAULT_CHUNK_OVERLAP = 80
 DEFAULT_EMBEDDING_DIM = 1536
+DEFAULT_TOKENIZER = "cl100k_base"
 LOCAL_EMBEDDING_MODELS = {"local", "local-hash", "local-embedding", "local-keyword", "keyword"}
 
 
@@ -61,6 +62,7 @@ def chunk_text(
     *,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     overlap: int = DEFAULT_CHUNK_OVERLAP,
+    tokenizer: str | None = None,
 ) -> list[str]:
     text_value = _normalize_text(text_value)
     if not text_value:
@@ -69,6 +71,14 @@ def chunk_text(
         raise ValueError("chunk_size must be greater than 0")
     if overlap < 0 or overlap >= chunk_size:
         raise ValueError("overlap must be greater than or equal to 0 and less than chunk_size")
+
+    if tokenizer:
+        return _chunk_text_by_tokens(
+            text_value,
+            chunk_size=chunk_size,
+            overlap=overlap,
+            tokenizer=tokenizer,
+        )
 
     chunks: list[str] = []
     start = 0
@@ -109,6 +119,31 @@ def rank_chunks(chunks: list[dict[str, Any]], query: str) -> list[dict[str, Any]
     return sorted(ranked, key=lambda item: (item["score"], item.get("id") or 0), reverse=True)
 
 
+def apply_context_budget(
+    chunks: list[dict[str, Any]],
+    context_budget_tokens: int | None,
+) -> list[dict[str, Any]]:
+    if context_budget_tokens is None:
+        return chunks
+    if context_budget_tokens <= 0:
+        raise ValueError("context_budget_tokens must be greater than 0")
+
+    selected: list[dict[str, Any]] = []
+    used_tokens = 0
+    for chunk in chunks:
+        token_count = int(
+            chunk.get("token_count") or _estimate_token_count(chunk.get("content") or "")
+        )
+        if selected and used_tokens + token_count > context_budget_tokens:
+            break
+        if not selected and token_count > context_budget_tokens:
+            selected.append(chunk)
+            break
+        selected.append(chunk)
+        used_tokens += token_count
+    return selected
+
+
 async def retrieve_chunks(
     conn,
     *,
@@ -116,6 +151,7 @@ async def retrieve_chunks(
     query: str,
     top_k: int,
     score_threshold: float,
+    context_budget_tokens: int | None = None,
 ) -> list[dict[str, Any]]:
     knowledge_base = await _get_knowledge_base_for_processing(conn, knowledge_base_id)
     vector_results = await _retrieve_chunks_by_vector(
@@ -126,14 +162,15 @@ async def retrieve_chunks(
         score_threshold=score_threshold,
     )
     if vector_results:
-        return vector_results
-    return await _retrieve_chunks_by_keyword(
+        return apply_context_budget(vector_results, context_budget_tokens)
+    keyword_results = await _retrieve_chunks_by_keyword(
         conn,
         knowledge_base_id=knowledge_base_id,
         query=query,
         top_k=top_k,
         score_threshold=score_threshold,
     )
+    return apply_context_budget(keyword_results, context_budget_tokens)
 
 
 async def _retrieve_chunks_by_vector(
@@ -156,6 +193,7 @@ async def _retrieve_chunks_by_vector(
               c.id,
               c.content,
               c.chunk_index,
+              c.token_count,
               c.metadata_json,
               d.id AS document_id,
               d.file_name,
@@ -199,6 +237,7 @@ async def _retrieve_chunks_by_keyword(
               c.id,
               c.content,
               c.chunk_index,
+              c.token_count,
               c.metadata_json,
               d.id AS document_id,
               d.file_name
@@ -224,11 +263,17 @@ async def _retrieve_chunks_by_keyword(
 async def process_document_job(conn, job: dict[str, Any]) -> int:
     document = await _get_document_for_processing(conn, job["document_id"])
     knowledge_base = await _get_knowledge_base_for_processing(conn, document["knowledge_base_id"])
+    chunking = _chunking_options(knowledge_base)
     await _mark_document_status(conn, document["id"], "parsing")
     extracted_text = extract_text_from_file(document["storage_url"], document.get("file_type"))
 
     await _mark_document_status(conn, document["id"], "chunking")
-    chunks = chunk_text(extracted_text)
+    chunks = chunk_text(
+        extracted_text,
+        chunk_size=chunking["chunk_size_tokens"],
+        overlap=chunking["chunk_overlap_tokens"],
+        tokenizer=chunking["tokenizer"],
+    )
     if not chunks:
         raise DocumentProcessingError("chunking", "document produced no text chunks")
 
@@ -377,7 +422,10 @@ async def _replace_document_chunks(
                 "document_id": document["id"],
                 "chunk_index": index,
                 "content": chunk,
-                "token_count": _estimate_token_count(chunk),
+                "token_count": _estimate_token_count(
+                    chunk,
+                    tokenizer=str(knowledge_base.get("tokenizer") or DEFAULT_TOKENIZER),
+                ),
                 "embedding": _vector_to_pgvector(embeddings[index]),
                 "metadata_json": {
                     "source_file_name": document["file_name"],
@@ -385,6 +433,15 @@ async def _replace_document_chunks(
                     "embedding_provider": provider,
                     "embedding_model": model,
                     "embedding_dim": len(embeddings[index]),
+                    "tokenizer": knowledge_base.get("tokenizer") or DEFAULT_TOKENIZER,
+                    "chunk_size_tokens": (knowledge_base.get("config_json") or {}).get(
+                        "chunk_size_tokens",
+                        DEFAULT_CHUNK_SIZE,
+                    ),
+                    "chunk_overlap_tokens": (knowledge_base.get("config_json") or {}).get(
+                        "chunk_overlap_tokens",
+                        DEFAULT_CHUNK_OVERLAP,
+                    ),
                 },
             },
         )
@@ -448,6 +505,34 @@ def _embedding_provider_and_model(knowledge_base: dict[str, Any]) -> tuple[str, 
     return provider, model
 
 
+def _chunking_options(knowledge_base: dict[str, Any]) -> dict[str, Any]:
+    config = knowledge_base.get("config_json") or {}
+    chunk_size = _int_processing_config(config, "chunk_size_tokens", DEFAULT_CHUNK_SIZE)
+    chunk_overlap = _int_processing_config(config, "chunk_overlap_tokens", DEFAULT_CHUNK_OVERLAP)
+    if chunk_size <= 0:
+        raise DocumentProcessingError("chunking", "chunk_size_tokens must be greater than 0")
+    if chunk_overlap < 0 or chunk_overlap >= chunk_size:
+        raise DocumentProcessingError(
+            "chunking",
+            "chunk_overlap_tokens must be greater than or equal to 0 "
+            "and less than chunk_size_tokens",
+        )
+
+    # The MVP stores token_count using the KB tokenizer so retrieval budgets are deterministic.
+    return {
+        "chunk_size_tokens": chunk_size,
+        "chunk_overlap_tokens": chunk_overlap,
+        "tokenizer": str(knowledge_base.get("tokenizer") or DEFAULT_TOKENIZER),
+    }
+
+
+def _int_processing_config(config: dict[str, Any], key: str, default: int) -> int:
+    try:
+        return int(config.get(key, default))
+    except (TypeError, ValueError) as exc:
+        raise DocumentProcessingError("chunking", f"{key} must be an integer") from exc
+
+
 async def _embed_texts_with_openai(
     api_key: str,
     model: str,
@@ -482,9 +567,11 @@ def _vector_to_pgvector(vector: list[float]) -> str:
 
 
 def _chunk_response(item: dict[str, Any], *, retrieval_mode: str) -> dict[str, Any]:
+    token_count = int(item.get("token_count") or _estimate_token_count(item.get("content") or ""))
     return {
         "chunk_id": str(item["id"]),
         "content": item["content"],
+        "token_count": token_count,
         "score": float(item.get("score") or 0.0),
         "retrieval_mode": retrieval_mode,
         "source": {
@@ -595,8 +682,48 @@ def _normalize_text(text_value: str) -> str:
     return "\n".join(line.rstrip() for line in text_value.replace("\r\n", "\n").split("\n")).strip()
 
 
-def _estimate_token_count(text_value: str) -> int:
-    return max(1, len(text_value.split()))
+def _estimate_token_count(text_value: str, *, tokenizer: str = DEFAULT_TOKENIZER) -> int:
+    try:
+        return max(1, len(_encoding_for_tokenizer(tokenizer).encode(text_value)))
+    except DocumentProcessingError:
+        raise
+    except Exception:
+        return max(1, len(text_value.split()))
+
+
+def _chunk_text_by_tokens(
+    text_value: str,
+    *,
+    chunk_size: int,
+    overlap: int,
+    tokenizer: str,
+) -> list[str]:
+    encoding = _encoding_for_tokenizer(tokenizer)
+    token_ids = encoding.encode(text_value)
+    chunks: list[str] = []
+    start = 0
+    while start < len(token_ids):
+        end = min(start + chunk_size, len(token_ids))
+        chunk = encoding.decode(token_ids[start:end]).strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= len(token_ids):
+            break
+        start = max(end - overlap, 0)
+    return chunks
+
+
+def _encoding_for_tokenizer(tokenizer: str):
+    try:
+        import tiktoken
+    except ImportError as exc:
+        raise DocumentProcessingError("chunking", "tiktoken is not installed") from exc
+
+    try:
+        return tiktoken.get_encoding(tokenizer)
+    except Exception as exc:
+        raise DocumentProcessingError("chunking", f"unsupported tokenizer: {tokenizer}") from exc
+
 
 
 def _is_text_content_type(file_type: str | None) -> bool:

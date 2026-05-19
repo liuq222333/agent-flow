@@ -1,10 +1,12 @@
 from io import BytesIO
 
+import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.datastructures import Headers, UploadFile
 
-from app.api.v1.knowledge import _validate_uploaded_file, rank_chunks
+from app.api.v1 import tools as tool_api
+from app.api.v1.knowledge import _normalize_knowledge_config, _validate_uploaded_file, rank_chunks
 from app.api.v1.secrets import decrypt_secret_value, encrypt_secret_value, sanitize_secret_row
 from app.api.v1.tools import mock_tool_test_result
 from app.main import app
@@ -18,7 +20,16 @@ def test_management_routes_are_registered() -> None:
     assert "/api/v1/knowledge-bases" in openapi["paths"]
     assert "/api/v1/tools" in openapi["paths"]
     assert "/api/v1/model-providers" in openapi["paths"]
+    assert "post" in openapi["paths"]["/api/v1/model-providers"]
+    assert "put" in openapi["paths"]["/api/v1/model-providers/{provider_id}"]
     assert "/api/v1/secrets" in openapi["paths"]
+    assert "post" in openapi["paths"]["/api/v1/model-configs"]
+    assert "put" in openapi["paths"]["/api/v1/model-configs/{model_config_id}"]
+    assert "/api/v1/workflow-versions/{version_id}/code" in openapi["paths"]
+    assert "/api/v1/workflow-versions/{version_id}/regenerate-code" in openapi["paths"]
+    assert "/api/v1/generated-workflows/cleanup" in openapi["paths"]
+    assert "/api/v1/runs/{run_id}/retry" in openapi["paths"]
+    assert "/api/v1/metrics" in openapi["paths"]
 
 
 def test_secret_helpers_encrypt_and_hide_value() -> None:
@@ -42,6 +53,31 @@ def test_tool_test_result_is_mock_only() -> None:
     assert result["response"]["input"] == {"order_id": 42}
 
 
+@pytest.mark.asyncio
+async def test_tool_config_resolution_supports_secret_redaction(monkeypatch) -> None:
+    async def fake_secret(conn, key):
+        assert key == "order_api_key"
+        return "real-secret"
+
+    monkeypatch.setattr(tool_api, "get_secret_value", fake_secret)
+    config = {
+        "headers": {"Authorization": "Bearer {{secrets.order_api_key}}"},
+        "body": {"order_id": "{{input.order_id}}"},
+    }
+
+    resolved = await tool_api._resolve_tool_value(None, config, {"order_id": "A-1001"})
+    safe = await tool_api._resolve_tool_value(
+        None,
+        config,
+        {"order_id": "A-1001"},
+        redact_secrets=True,
+    )
+
+    assert resolved["headers"]["Authorization"] == "Bearer real-secret"
+    assert safe["headers"]["Authorization"] == "Bearer ***"
+    assert safe["body"]["order_id"] == "A-1001"
+
+
 def test_rank_chunks_scores_text_matches() -> None:
     chunks = [
         {"id": 1, "content": "billing support and refund", "document_id": 10},
@@ -52,6 +88,40 @@ def test_rank_chunks_scores_text_matches() -> None:
 
     assert ranked[0]["id"] == 1
     assert ranked[0]["score"] == 1.0
+
+
+def test_knowledge_config_is_normalized_and_validated() -> None:
+    normalized = _normalize_knowledge_config(
+        {
+            "embedding_provider": "local-hash",
+            "chunk_size_tokens": "256",
+            "chunk_overlap_tokens": "32",
+        }
+    )
+
+    assert normalized["embedding_provider"] == "local"
+    assert normalized["chunk_size_tokens"] == 256
+    assert normalized["chunk_overlap_tokens"] == 32
+
+    try:
+        _normalize_knowledge_config(
+            {
+                "embedding_provider": "unknown",
+                "chunk_size_tokens": 256,
+                "chunk_overlap_tokens": 32,
+            }
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 400
+    else:
+        raise AssertionError("unsupported embedding provider should fail")
+
+    try:
+        _normalize_knowledge_config({"chunk_size_tokens": 80, "chunk_overlap_tokens": 80})
+    except HTTPException as exc:
+        assert exc.status_code == 400
+    else:
+        raise AssertionError("chunk overlap equal to chunk size should fail")
 
 
 def test_upload_file_validation_rejects_unsafe_inputs() -> None:

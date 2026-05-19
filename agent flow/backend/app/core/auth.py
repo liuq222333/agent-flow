@@ -9,6 +9,7 @@ PUBLIC_PATHS = {
     "/api/openapi.json",
     "/api/redoc",
     "/api/v1/health",
+    "/api/v1/metrics",
     "/api/v1/ready",
 }
 

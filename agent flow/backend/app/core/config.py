@@ -14,8 +14,9 @@ class Settings(BaseSettings):
     mock_user_id: int = 1
     auth_mode: str = "mock"
     api_bearer_token: str | None = None
-    default_model_provider: str = "openai"
+    default_model_provider: str = "deepseek"
     openai_api_key: str | None = None
+    deepseek_api_key: str | None = None
     max_upload_bytes: int = 10 * 1024 * 1024
     allowed_upload_content_types: str = (
         "text/plain,text/markdown,application/pdf,"

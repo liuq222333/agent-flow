@@ -150,6 +150,8 @@ def validate_graph(graph: Graph, mode: ValidationMode) -> dict[str, Any]:
                     node_id,
                 )
             )
+        if mode in {"publish", "run"} and node_type == "llm":
+            _validate_llm_node_config(node, path, errors)
 
     edge_ids: set[str] = set()
     outgoing: dict[str, list[str]] = defaultdict(list)
@@ -361,3 +363,30 @@ def _find_cycle(node_ids: Any, outgoing: dict[str, list[str]]) -> list[str] | No
 
 def _issue(code: str, message: str, path: str, node_id: str | None = None) -> dict[str, Any]:
     return {"code": code, "message": message, "path": path, "node_id": node_id}
+
+
+def _validate_llm_node_config(
+    node: dict[str, Any],
+    path: str,
+    errors: list[dict[str, Any]],
+) -> None:
+    node_id = node.get("id")
+    config = node.get("config") if isinstance(node.get("config"), dict) else {}
+    if not (config.get("model_config_id") or config.get("model")):
+        errors.append(
+            _issue(
+                "missing_llm_model",
+                "LLM Node 必须配置 model_config_id 或 model",
+                f"{path}.config.model_config_id",
+                node_id,
+            )
+        )
+    if not (config.get("user_prompt") or config.get("prompt")):
+        errors.append(
+            _issue(
+                "missing_llm_prompt",
+                "LLM Node 必须配置 user_prompt",
+                f"{path}.config.user_prompt",
+                node_id,
+            )
+        )

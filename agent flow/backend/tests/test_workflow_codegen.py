@@ -3,9 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from app.services import runtime
+from app.services import runtime, workflow_codegen
 from app.services.graph_validation import default_graph
-from app.services.workflow_codegen import generate_workflow_code
+from app.services.workflow_codegen import (
+    cleanup_generated_workflow_dirs,
+    generate_workflow_code,
+    inspect_workflow_code,
+    read_workflow_code_source,
+    resolve_generated_code_path,
+)
 
 
 def test_generate_workflow_code_creates_version_files(
@@ -64,3 +70,96 @@ def test_generate_workflow_code_does_not_overwrite_existing_version(tmp_path: Pa
             graph_hash="graph-hash",
             generated_root=tmp_path,
         )
+
+
+def test_read_workflow_code_source_detects_hash_changes(tmp_path: Path) -> None:
+    artifact = generate_workflow_code(
+        workflow_id=1,
+        version=1,
+        graph=default_graph(),
+        graph_hash="graph-hash",
+        generated_root=tmp_path,
+    )
+    workflow_file = tmp_path / "workflow_000001" / "v000001" / "workflow.py"
+    workflow_file.write_text(
+        workflow_file.read_text(encoding="utf-8") + "\n# local debug edit\n",
+        encoding="utf-8",
+    )
+
+    code = read_workflow_code_source(
+        str(workflow_file),
+        artifact.code_hash,
+        generated_root=tmp_path,
+    )
+    inspection = inspect_workflow_code(
+        str(workflow_file),
+        artifact.code_hash,
+        generated_root=tmp_path,
+    )
+
+    assert code.code_modified is True
+    assert code.code_status == "modified"
+    assert code.code_hash_actual != artifact.code_hash
+    assert "async def run" in code.source
+    assert inspection.code_modified is True
+
+
+def test_resolve_generated_code_path_prefers_canonical_backend_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend_root = tmp_path / "app"
+    generated_root = backend_root / "generated_workflows"
+    workflow_file = generated_root / "workflow_000001" / "v000001" / "workflow.py"
+    workflow_file.parent.mkdir(parents=True)
+    workflow_file.write_text("async def run(input_data, context):\n    return {}\n")
+
+    monkeypatch.setattr(workflow_codegen, "BACKEND_ROOT", backend_root)
+    monkeypatch.setattr(workflow_codegen, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(workflow_codegen, "GENERATED_ROOT", generated_root)
+
+    resolved = resolve_generated_code_path(
+        "backend/generated_workflows/workflow_000001/v000001/workflow.py",
+        generated_root=generated_root,
+    )
+    inspection = inspect_workflow_code(
+        "backend/generated_workflows/workflow_000001/v000001/workflow.py",
+        None,
+        generated_root=generated_root,
+    )
+
+    assert resolved == workflow_file.resolve()
+    assert inspection.code_status == "ok"
+
+
+def test_cleanup_generated_workflow_dirs_removes_tmp_and_orphans(tmp_path: Path) -> None:
+    kept_artifact = generate_workflow_code(
+        workflow_id=1,
+        version=1,
+        graph=default_graph(),
+        graph_hash="graph-hash",
+        generated_root=tmp_path,
+    )
+    orphan_dir = tmp_path / "workflow_000001" / "v000002"
+    orphan_dir.mkdir()
+    (orphan_dir / "workflow.py").write_text("async def run(input_data, context):\n    return {}\n")
+    tmp_dir = tmp_path / "workflow_000001" / ".v000003.tmp-leftover"
+    tmp_dir.mkdir()
+    empty_workflow_dir = tmp_path / "workflow_000002"
+    empty_workflow_dir.mkdir()
+
+    report = cleanup_generated_workflow_dirs(
+        referenced_code_paths=[kept_artifact.code_path],
+        generated_root=tmp_path,
+    )
+
+    assert (tmp_path / "workflow_000001" / "v000001").exists()
+    assert not orphan_dir.exists()
+    assert not tmp_dir.exists()
+    assert not empty_workflow_dir.exists()
+    assert any(
+        path.endswith("workflow_000001/v000002")
+        for path in report.removed_orphan_version_dirs
+    )
+    assert any(path.endswith(".v000003.tmp-leftover") for path in report.removed_temp_dirs)
+    assert any(path.endswith("workflow_000002") for path in report.removed_empty_workflow_dirs)

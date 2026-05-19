@@ -151,8 +151,13 @@ CONFIG_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "object",
         "required": ["model", "user_prompt"],
         "properties": {
-            "provider": {"type": "string", "default": "openai"},
-            "model": {"type": "string"},
+            "model_config_id": {"type": "integer"},
+            "provider": {
+                "type": "string",
+                "enum": ["mock", "deepseek", "openai"],
+                "default": "deepseek",
+            },
+            "model": {"type": "string", "default": "deepseek-v4-flash"},
             "system_prompt": {"type": "string", "default": ""},
             "user_prompt": {"type": "string"},
             "temperature": {"type": "number", "minimum": 0, "maximum": 2, "default": 0.3},
@@ -276,6 +281,7 @@ FORM_SCHEMAS: dict[str, dict[str, Any]] = {
         "start": [],
         "input": [("config.fields", "输入字段", "field_array", False)],
         "llm": [
+            ("config.model_config_id", "模型配置", "select", False),
             ("config.provider", "Provider", "input", False),
             ("config.model", "模型", "input", True),
             ("config.system_prompt", "System Prompt", "textarea", False),

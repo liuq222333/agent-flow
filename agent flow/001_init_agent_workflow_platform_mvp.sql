@@ -392,6 +392,17 @@ VALUES
   ('openai', 'openai', 'active', '{"api_key_secret": "openai_api_key"}'::jsonb)
 ON CONFLICT (name) DO NOTHING;
 
+INSERT INTO model_providers (name, provider_type, base_url, status, config_json)
+VALUES
+  (
+    'deepseek',
+    'deepseek',
+    'https://api.deepseek.com',
+    'active',
+    '{"api_key_secret": "deepseek_api_key"}'::jsonb
+  )
+ON CONFLICT (name) DO NOTHING;
+
 INSERT INTO model_configs (
   provider_id,
   model_name,
@@ -411,6 +422,27 @@ SELECT
   'active'
 FROM model_providers p
 WHERE p.name = 'openai'
+ON CONFLICT (provider_id, model_name) DO NOTHING;
+
+INSERT INTO model_configs (
+  provider_id,
+  model_name,
+  model_type,
+  display_name,
+  context_window,
+  default_config_json,
+  status
+)
+SELECT
+  p.id,
+  'deepseek-v4-flash',
+  'chat',
+  'DeepSeek V4-Flash',
+  1000000,
+  '{"temperature": 0.3, "max_tokens": 1000, "model_version": "DeepSeek-V4-Flash", "api_model_alias": "deepseek-v4-flash", "thinking_mode": false}'::jsonb,
+  'active'
+FROM model_providers p
+WHERE p.name = 'deepseek'
 ON CONFLICT (provider_id, model_name) DO NOTHING;
 
 INSERT INTO model_configs (

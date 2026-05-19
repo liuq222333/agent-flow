@@ -13,6 +13,7 @@ Agent 工作流平台 MVP 环境骨架。
 - API + Message：支持 API 节点响应映射、Message 追加和敏感 header 脱敏。
 - Trace code metadata：运行 trace 可看到生成代码路径、hash、是否被本地修改等代码元数据。
 - Trace 节点 input/output 展开：前端 trace 面板可展开节点输入、输出、错误与 metadata，便于定位问题。
+- Ops 队列与 worker 运维入口已覆盖 workflow/document worker 心跳、workflow run 队列深度、dead-letter 查看和恢复动作。
 
 仍需后续增强：
 
@@ -24,7 +25,7 @@ Agent 工作流平台 MVP 环境骨架。
 
 当前生产化边界：
 
-- 已具备基础 health / ready 检查、幂等数据库补丁脚本、本地 Compose 编排、workflow/document worker、端到端 smoke、Secret 脱敏和 trace 定位能力。
+- 已具备基础 health / ready / metrics 检查、Ops 队列入口、幂等数据库补丁脚本、本地 Compose 编排、workflow/document worker、端到端 smoke、Secret 脱敏和 trace 定位能力。
 - 本仓库当前没有声明已具备企业生产级 KMS、集中监控告警、日志聚合、自动化备份恢复、灰度发布或完整多租户权限体系。
 - 生产部署前请以 [OPERATIONS.md](OPERATIONS.md) 和 [agent_workflow_platform_testing_deployment_v_1.md](agent_workflow_platform_testing_deployment_v_1.md) 的 checklist 为准逐项确认。
 
@@ -115,6 +116,8 @@ docker compose exec -T postgres psql -U agent_flow -d agent_flow -c "select coun
 
 - API health: http://localhost:8000/api/v1/health
 - API ready: http://localhost:8000/api/v1/ready
+- API metrics: http://localhost:8000/api/v1/metrics
+- Ops queues: http://localhost:8000/api/v1/ops/queues
 - API docs: http://localhost:8000/api/docs
 - Frontend: http://localhost:3000
 - PostgreSQL: localhost:5432
@@ -123,6 +126,8 @@ docker compose exec -T postgres psql -U agent_flow -d agent_flow -c "select coun
 Redis 对外端口默认使用 `6380`，避免和本机已有 Redis 的常用 `6379` 端口冲突。容器内部仍使用 `redis://redis:6379/0`。
 
 Docker Compose 中 API 服务使用 `uvicorn --reload --reload-dir app`，只监听容器内 `/app/app` 目录。`backend/generated_workflows` 是运行时生成代码目录，不会触发 API reload；手动修改 generated workflow 后需要重新运行工作流或重启相关服务来验证行为。
+
+Docker / 端口验收时请同时确认 Docker Desktop 已启动、`docker compose ps` 中 api/frontend/worker/postgres/redis 均为运行状态，宿主机访问 Redis 使用 `localhost:6380`，前端如切到 `3001` 需同步检查 `CORS_ALLOWED_ORIGINS`。
 
 ## 本地 Compose 与生产差异
 
@@ -141,9 +146,10 @@ Docker Compose 中 API 服务使用 `uvicorn --reload --reload-dir app`，只监
 
 上线前逐项确认：
 
-- Env / secrets：`.env` 不使用示例密码；`DATABASE_URL`、`REDIS_URL`、`SECRET_ENCRYPTION_KEY`、`OPENAI_API_KEY`、`CORS_ALLOWED_ORIGINS`、`STORAGE_DIR`、上传大小和类型限制均按环境配置；`SECRET_ENCRYPTION_KEY` 长度不少于 32 字符并由安全渠道分发。
+- Env / secrets：`.env` 不使用示例密码；`DATABASE_URL`、`REDIS_URL`、`SECRET_ENCRYPTION_KEY`、`DEEPSEEK_API_KEY`、`OPENAI_API_KEY`、`CORS_ALLOWED_ORIGINS`、`STORAGE_DIR`、上传大小和类型限制均按环境配置；`SECRET_ENCRYPTION_KEY` 长度不少于 32 字符并由安全渠道分发。
 - DB migration：空库已执行 `001`，已有库已执行 `npm run db:migrate` 或等价 SQL；`pgvector` 可用；`knowledge_chunks.embedding` 为当前 1536 维约定。
 - Worker：`worker-workflow` 和 `worker-document` 均独立运行；异步工作流和文档处理不会长期停留在 `pending`。
+- Ops：前端 Ops 页面和 `/api/v1/ops/*` 已支持 workflow/document worker 心跳、Redis 队列积压、dead-letter 查看和恢复动作；document worker 处理详情仍通过 `docker compose logs worker-document` 和文档任务状态验证。
 - Health / ready：`/api/v1/health` 返回 `ok`，`/api/v1/ready` 返回 `ready`，并检查 database、redis、encryption_key、default_model_provider。
 - Smoke：部署后执行 `npm run smoke:e2e` 或等价脚本，覆盖 generated workflow、sync/async、Knowledge、Intent/Branch、API/Message 和 trace 脱敏。
 - Backup：发布前备份 PostgreSQL；确认上传文件目录或对象存储已有备份策略；记录当前镜像 tag、migration 版本和 `.env` 变更。
@@ -170,9 +176,9 @@ Docker Compose 中 API 服务使用 `uvicorn --reload --reload-dir app`，只监
 
 Runtime 当前使用本地 generated workflow 执行模式：发布工作流时生成版本化 Python 代码，运行时 import 对应版本的本地代码执行，并真实写入 `workflow_runs` 和 `node_runs`。同步运行直接在 API 内执行；异步运行会创建 pending run 并通过 Redis list 交给 `worker-workflow` 执行。
 
-前端控制台目前包含 Workflow / Knowledge / Tools / Secrets / Models 五个入口。Workflow 编辑器支持节点库、连线同步、节点 JSON 配置、发布、同步/异步运行和 trace 定位。Trace 面板支持查看 code metadata，并可展开每个节点的 input、output、error 和 metadata。Knowledge 可以创建知识库、上传文档、重试/删除文档，并由 `worker-document` 解析为 chunks 后检索。Tools 支持创建、编辑和测试 API tool；Secrets 支持创建与更新，但列表只展示脱敏元数据。
+前端控制台目前包含 Workflow / Knowledge / Tools / Secrets / Models / Ops 六个入口。Workflow 编辑器支持节点库、连线同步、节点 JSON 配置、发布、同步/异步运行和 trace 定位。Trace 面板支持查看 code metadata，并可展开每个节点的 input、output、error 和 metadata。Knowledge 可以创建知识库、上传文档、重试/删除文档，并由 `worker-document` 解析为 chunks 后检索。Tools 支持创建、编辑和测试 API tool；Secrets 支持创建与更新，但列表只展示脱敏元数据；Ops 支持查看 workflow/document worker 心跳、workflow run 队列、dead-letter 和恢复动作。
 
-当前 LLM Node 默认返回本地模拟回答；如果节点配置 `provider=openai`，运行时会使用 `OPENAI_API_KEY` 或 active secret `openai_api_key` 调用 OpenAI，缺少 key 时明确失败。Intent Node 支持本地关键词分类，也可以配置 OpenAI 分类。API Node 默认使用安全 mock 模式，`mode=http` 仅允许公共 HTTP/HTTPS 地址，会阻止 localhost、private network、link-local 等目标。Knowledge Base Node 会优先使用 `knowledge_chunks.embedding` 走 pgvector cosine 检索；没有向量或向量检索不可用时自动回退到关键词检索。默认 `local-hash` / `local-embedding` 模式可离线生成 1536 维向量，配置 `embedding_provider=openai` 时会使用 OpenAI embedding。
+当前 LLM Node 默认使用 DeepSeek 配置项：`provider=deepseek`、`model=deepseek-v4-flash`，界面展示为 DeepSeek V4-Flash；运行时会使用 `DEEPSEEK_API_KEY` 或 active secret `deepseek_api_key` 通过 `https://api.deepseek.com` 调用 OpenAI-compatible Chat Completions。DeepSeek 默认以 `thinking_mode=false` 调用，后续可在节点配置中显式开启。缺少 key 时 DeepSeek 节点会明确失败。保留 `provider=mock` 本地模拟模式；如果节点配置 `provider=openai`，运行时会使用 `OPENAI_API_KEY` 或 active secret `openai_api_key` 调用 OpenAI。Intent Node 支持本地关键词分类，也可以配置 OpenAI 分类。API Node 默认使用安全 mock 模式，`mode=http` 仅允许公共 HTTP/HTTPS 地址，会阻止 localhost、private network、link-local 等目标。Knowledge Base Node 会优先使用 `knowledge_chunks.embedding` 走 pgvector cosine 检索；没有向量或向量检索不可用时自动回退到关键词检索。默认 `local-hash` / `local-embedding` 模式可离线生成 1536 维向量，配置 `embedding_provider=openai` 时会使用 OpenAI embedding。
 
 `npm run smoke:e2e` 会创建测试知识库、上传文档、验证 vector retrieve、发布 generated workflow code，并分别跑同步/异步工作流、Knowledge Runtime、Intent + Branch、API + Message 工作流；其中 API smoke 会验证变量映射、Message/最终输出和敏感 header trace 脱敏，适合作为每轮开发后的回归验收。
 
@@ -235,7 +241,7 @@ npm run compose:up
 
 - Redis 端口：宿主机访问 `localhost:6380`，容器内访问 `redis://redis:6379/0`。如果连接 `localhost:6379` 失败，先确认使用的是宿主机还是容器内地址。
 - Docker API：`npm run compose:up` 前确认 Docker Desktop 已启动，`docker compose ps` 可返回服务列表；如果 Docker API 无响应，重启 Docker Desktop 后再执行。
-- Async pending：异步 run 长期 `pending` 时检查 `docker compose ps worker-workflow`、`docker compose logs worker-workflow`、Redis 队列和 `/api/v1/ready` 的 redis/database 检查。
+- Async pending：异步 run 长期 `pending` 时检查 `docker compose ps worker-workflow`、`docker compose logs worker-workflow`、`/api/v1/ops/queues`、`/api/v1/ops/workers` 和 `/api/v1/ready` 的 redis/database 检查。
 - `generated_workflows` reload：Compose API reload 只监听 `app` 目录，手改 `backend/generated_workflows` 不会触发 API 重载；重新运行工作流或重启 API / worker 后验证。
 - Postgres volume migration：已有 `postgres_data` volume 不会自动重跑 `/docker-entrypoint-initdb.d`；保留数据请执行 `npm run db:migrate`，可丢弃本地数据时才使用 `docker compose down -v`。
 

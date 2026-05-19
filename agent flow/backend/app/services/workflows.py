@@ -1,6 +1,10 @@
 import hashlib
 import json
+import shutil
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import HTTPException, status
 from sqlalchemy import bindparam, text
@@ -9,6 +13,8 @@ from sqlalchemy.dialects.postgresql import JSONB
 from app.api.v1.schemas import (
     CreateWorkflowRequest,
     PublishWorkflowRequest,
+    RegenerateWorkflowCodeRequest,
+    RetryRunRequest,
     RunWorkflowRequest,
     UpdateWorkflowRequest,
 )
@@ -22,8 +28,13 @@ from app.services.runtime import (
 )
 from app.services.workflow_codegen import (
     WorkflowCodeArtifact,
+    cleanup_generated_workflow_dirs,
     generate_workflow_code,
+    generated_workflow_version_dir,
+    inspect_workflow_code,
+    read_workflow_code_source,
     remove_generated_workflow_version,
+    resolve_generated_code_path,
 )
 
 
@@ -246,7 +257,8 @@ async def publish_workflow(
             graph_hash = hashlib.sha256(
                 json.dumps(graph, sort_keys=True).encode("utf-8")
             ).hexdigest()
-            artifact = generate_workflow_code(
+            artifact = await _generate_workflow_code_with_cleanup(
+                conn,
                 workflow_id=workflow_id,
                 version=int(next_version),
                 graph=graph,
@@ -370,7 +382,7 @@ async def list_versions(workflow_id: int, *, page: int, page_size: int) -> dict[
             {"workflow_id": workflow_id, "limit": page_size, "offset": (page - 1) * page_size},
         )
         return {
-            "items": [dict(row) for row in result.mappings()],
+            "items": [_with_code_inspection(dict(row)) for row in result.mappings()],
             "page": page,
             "page_size": page_size,
             "total": total or 0,
@@ -389,7 +401,89 @@ async def get_version(version_id: int) -> dict[str, Any]:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="workflow version not found",
             )
-        return dict(row)
+        return _with_code_inspection(dict(row))
+
+
+async def get_version_code(version_id: int) -> dict[str, Any]:
+    async with engine.begin() as conn:
+        version = await _get_version_row(conn, version_id)
+        inspection = inspect_workflow_code(version.get("code_path"), version.get("code_hash"))
+        if inspection.code_status in {"missing_metadata", "missing_file"}:
+            version = await _ensure_version_code(conn, version)
+        try:
+            code = read_workflow_code_source(version["code_path"], version.get("code_hash"))
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "workflow_code_missing", "message": str(exc)},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "workflow_code_invalid_path", "message": str(exc)},
+            ) from exc
+        return {
+            "id": version["id"],
+            "workflow_id": version["workflow_id"],
+            "version": version["version"],
+            "schema_version": version["schema_version"],
+            "code_path": code.code_path,
+            "code_hash": version.get("code_hash"),
+            "code_hash_actual": code.code_hash_actual,
+            "code_modified": code.code_modified,
+            "code_status": code.code_status,
+            "code_generated_at": version.get("code_generated_at"),
+            "source": code.source,
+        }
+
+
+async def regenerate_version_code(
+    version_id: int,
+    payload: RegenerateWorkflowCodeRequest,
+) -> dict[str, Any]:
+    settings = get_settings()
+    async with engine.begin() as conn:
+        result = await _regenerate_version_code_locked(
+            conn,
+            version_id,
+            force=payload.force,
+            allowed_statuses={"missing_metadata", "missing_file", "invalid_path"},
+            skip_when_unneeded=False,
+            actor_user_id=settings.mock_user_id,
+            audit_action="workflow_version.regenerate_code",
+        )
+        version = result["version"]
+        return {
+            **version,
+            "regenerated": result["regenerated"],
+            "previous_code_status": result["previous_code_status"],
+        }
+
+
+async def cleanup_generated_workflows(*, dry_run: bool) -> dict[str, Any]:
+    settings = get_settings()
+    async with engine.begin() as conn:
+        referenced_code_paths = await _list_referenced_code_paths(conn)
+        report = cleanup_generated_workflow_dirs(
+            referenced_code_paths=referenced_code_paths,
+            dry_run=dry_run,
+        )
+        payload = asdict(report)
+        payload["removed_total"] = (
+            len(report.removed_temp_dirs)
+            + len(report.removed_orphan_version_dirs)
+            + len(report.removed_empty_workflow_dirs)
+        )
+        payload["kept_total"] = len(report.kept_version_dirs)
+        if not dry_run and payload["removed_total"] > 0:
+            await write_audit_log(
+                conn,
+                actor_user_id=settings.mock_user_id,
+                action="generated_workflows.cleanup",
+                resource_type="generated_workflows",
+                detail=payload,
+            )
+        return payload
 
 
 async def run_workflow(workflow_id: int, payload: RunWorkflowRequest) -> dict[str, Any]:
@@ -610,6 +704,85 @@ async def cancel_run(run_id: int) -> dict[str, Any]:
         return {"run_id": row["id"], "status": row["status"], "cancelled": True}
 
 
+async def retry_run(run_id: int, payload: RetryRunRequest) -> dict[str, Any]:
+    settings = get_settings()
+    retry_run_id: int | None = None
+    response_payload: dict[str, Any] | None = None
+    async with engine.begin() as conn:
+        original_run = await _get_run_row(conn, run_id)
+        if original_run["status"] not in {"failed", "cancelled"}:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="only failed or cancelled runs can be retried",
+            )
+
+        version = await _get_version_row(conn, original_run["version_id"])
+        version = await _ensure_version_code(conn, version)
+        run_input = (
+            payload.input if payload.input is not None else (original_run["input_json"] or {})
+        )
+        next_run = await create_generated_workflow_run_pending(
+            conn,
+            workflow_id=original_run["workflow_id"],
+            version_id=original_run["version_id"],
+            code_path=version.get("code_path"),
+            code_hash=version.get("code_hash"),
+            run_input=run_input,
+            trigger_type=original_run["trigger_type"],
+            created_by=original_run.get("created_by") or settings.mock_user_id,
+        )
+        metadata = dict(next_run.get("metadata_json") or {})
+        metadata.update(
+            {
+                "retry_of_run_id": original_run["id"],
+                "retry_of_status": original_run["status"],
+                "retry_reason": payload.reason,
+            }
+        )
+        result = await conn.execute(
+            _jsonb_stmt(
+                """
+                UPDATE workflow_runs
+                SET metadata_json = :metadata_json,
+                    updated_at = now()
+                WHERE id = :run_id
+                RETURNING *
+                """,
+                "metadata_json",
+            ),
+            {"run_id": next_run["id"], "metadata_json": metadata},
+        )
+        next_run = dict(result.mappings().one())
+        await write_audit_log(
+            conn,
+            actor_user_id=settings.mock_user_id,
+            action="workflow.retry",
+            resource_type="workflow_run",
+            resource_id=next_run["id"],
+            detail={
+                "retry_of_run_id": original_run["id"],
+                "retry_of_status": original_run["status"],
+                "workflow_id": original_run["workflow_id"],
+                "version_id": original_run["version_id"],
+            },
+        )
+        retry_run_id = int(next_run["id"])
+        response_payload = {
+            "run_id": next_run["id"],
+            "status": next_run["status"],
+            "retry_of_run_id": original_run["id"],
+            "output": next_run["output_json"] or {},
+            "started_at": next_run["started_at"],
+            "ended_at": next_run["ended_at"],
+        }
+
+    if retry_run_id is not None and response_payload is not None:
+        await _enqueue_async_workflow_run(retry_run_id)
+        return response_payload
+
+    raise RuntimeError("workflow retry did not produce a response")
+
+
 def validate_workflow_graph(graph: dict[str, Any], mode: str) -> dict[str, Any]:
     return validate_graph(graph, mode)  # type: ignore[arg-type]
 
@@ -658,30 +831,96 @@ async def _get_version_row(conn, version_id: int) -> dict[str, Any]:
 
 
 async def _ensure_version_code(conn, version: dict[str, Any]) -> dict[str, Any]:
-    if version.get("code_path"):
+    inspection = inspect_workflow_code(version.get("code_path"), version.get("code_hash"))
+    if inspection.code_status not in {"missing_metadata", "missing_file"}:
         return version
 
+    result = await _regenerate_version_code_locked(
+        conn,
+        int(version["id"]),
+        force=False,
+        allowed_statuses={"missing_metadata", "missing_file"},
+        skip_when_unneeded=True,
+        actor_user_id=None,
+        audit_action=None,
+    )
+    return result["version"]
+
+
+async def _regenerate_version_code_locked(
+    conn,
+    version_id: int,
+    *,
+    force: bool,
+    allowed_statuses: set[str],
+    skip_when_unneeded: bool,
+    actor_user_id: int | None,
+    audit_action: str | None,
+) -> dict[str, Any]:
     locked = await conn.execute(
         text("SELECT * FROM workflow_versions WHERE id = :version_id FOR UPDATE"),
-        {"version_id": version["id"]},
+        {"version_id": version_id},
     )
-    version = dict(locked.mappings().one())
-    if version.get("code_path"):
-        return version
+    row = locked.mappings().one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="workflow version not found",
+        )
+    version = dict(row)
+    inspection = inspect_workflow_code(version.get("code_path"), version.get("code_hash"))
+    if not force and inspection.code_status not in allowed_statuses:
+        if skip_when_unneeded:
+            return {
+                "version": _with_code_inspection(version),
+                "regenerated": False,
+                "previous_code_status": inspection.code_status,
+            }
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "workflow_code_regenerate_blocked",
+                "message": (
+                    "workflow code exists; pass force=true to replace it"
+                    if inspection.code_status == "ok"
+                    else "workflow code has local hash changes; pass force=true to replace it"
+                ),
+                "code_status": inspection.code_status,
+            },
+        )
+
+    target_dir = generated_workflow_version_dir(
+        workflow_id=int(version["workflow_id"]),
+        version=int(version["version"]),
+    ).resolve()
+    if await _generated_version_dir_is_referenced_elsewhere(
+        conn,
+        target_dir,
+        exclude_version_id=version_id,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "workflow_code_version_dir_referenced",
+                "message": "generated workflow version directory is referenced by another version",
+            },
+        )
 
     graph = version["graph_json"]
     graph_hash = version.get("graph_hash") or hashlib.sha256(
         json.dumps(graph, sort_keys=True).encode("utf-8")
     ).hexdigest()
     artifact: WorkflowCodeArtifact | None = None
+    backup_dir = _backup_generated_version_dir(target_dir)
     try:
-        artifact = generate_workflow_code(
+        artifact = await _generate_workflow_code_with_cleanup(
+            conn,
             workflow_id=int(version["workflow_id"]),
             version=int(version["version"]),
             graph=graph,
             graph_hash=graph_hash,
         )
-        result = await conn.execute(
+        updated_result = await conn.execute(
             text(
                 """
                 UPDATE workflow_versions
@@ -693,17 +932,131 @@ async def _ensure_version_code(conn, version: dict[str, Any]) -> dict[str, Any]:
                 """
             ),
             {
-                "version_id": version["id"],
+                "version_id": version_id,
                 "code_path": artifact.code_path,
                 "code_hash": artifact.code_hash,
                 "code_generated_at": artifact.code_generated_at,
             },
         )
-        return dict(result.mappings().one())
+        updated = dict(updated_result.mappings().one())
+        if actor_user_id is not None and audit_action is not None:
+            await write_audit_log(
+                conn,
+                actor_user_id=actor_user_id,
+                action=audit_action,
+                resource_type="workflow_version",
+                resource_id=version_id,
+                detail={
+                    "workflow_id": updated["workflow_id"],
+                    "version": updated["version"],
+                    "force": force,
+                    "previous_code_status": inspection.code_status,
+                    "code_hash": updated["code_hash"],
+                },
+            )
     except Exception:
         if artifact is not None:
             remove_generated_workflow_version(artifact.version_dir)
+        _restore_generated_version_backup(target_dir, backup_dir)
         raise
+
+    _discard_generated_version_backup(backup_dir)
+    return {
+        "version": _with_code_inspection(updated),
+        "regenerated": True,
+        "previous_code_status": inspection.code_status,
+    }
+
+
+async def _generated_version_dir_is_referenced_elsewhere(
+    conn,
+    version_dir: Path,
+    *,
+    exclude_version_id: int,
+) -> bool:
+    result = await conn.execute(
+        text(
+            """
+            SELECT id, code_path
+            FROM workflow_versions
+            WHERE code_path IS NOT NULL AND id <> :version_id
+            """
+        ),
+        {"version_id": exclude_version_id},
+    )
+    target = version_dir.resolve()
+    for row in result.mappings():
+        try:
+            referenced_dir = resolve_generated_code_path(str(row["code_path"])).parent.resolve()
+        except ValueError:
+            continue
+        if referenced_dir == target:
+            return True
+    return False
+
+
+def _backup_generated_version_dir(version_dir: Path) -> Path | None:
+    if not version_dir.exists():
+        return None
+    backup_dir = version_dir.with_name(f".{version_dir.name}.backup-{uuid4().hex}")
+    version_dir.rename(backup_dir)
+    return backup_dir
+
+
+def _restore_generated_version_backup(version_dir: Path, backup_dir: Path | None) -> None:
+    if backup_dir is None or not backup_dir.exists():
+        return
+    shutil.rmtree(version_dir, ignore_errors=True)
+    backup_dir.rename(version_dir)
+
+
+def _discard_generated_version_backup(backup_dir: Path | None) -> None:
+    if backup_dir is not None:
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+
+async def _generate_workflow_code_with_cleanup(
+    conn,
+    *,
+    workflow_id: int,
+    version: int,
+    graph: dict[str, Any],
+    graph_hash: str,
+) -> WorkflowCodeArtifact:
+    try:
+        return generate_workflow_code(
+            workflow_id=workflow_id,
+            version=version,
+            graph=graph,
+            graph_hash=graph_hash,
+        )
+    except FileExistsError:
+        cleanup_generated_workflow_dirs(
+            referenced_code_paths=await _list_referenced_code_paths(conn),
+            dry_run=False,
+        )
+        return generate_workflow_code(
+            workflow_id=workflow_id,
+            version=version,
+            graph=graph,
+            graph_hash=graph_hash,
+        )
+
+
+async def _list_referenced_code_paths(conn) -> list[str]:
+    result = await conn.execute(
+        text("SELECT code_path FROM workflow_versions WHERE code_path IS NOT NULL")
+    )
+    return [str(path) for path in result.scalars().all() if path]
+
+
+def _with_code_inspection(version: dict[str, Any]) -> dict[str, Any]:
+    inspection = inspect_workflow_code(version.get("code_path"), version.get("code_hash"))
+    version["code_path"] = inspection.code_path or version.get("code_path")
+    version["code_hash_actual"] = inspection.code_hash_actual
+    version["code_modified"] = inspection.code_modified
+    version["code_status"] = inspection.code_status
+    return version
 
 
 async def _get_run_row(conn, run_id: int) -> dict[str, Any]:

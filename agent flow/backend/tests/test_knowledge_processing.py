@@ -2,6 +2,7 @@ import pytest
 
 from app.services.knowledge_processing import (
     DocumentProcessingError,
+    apply_context_budget,
     chunk_text,
     embed_texts,
     extract_text_from_file,
@@ -118,6 +119,28 @@ def test_chunk_text_preserves_overlap_and_uses_boundaries() -> None:
 def test_chunk_text_rejects_invalid_overlap() -> None:
     with pytest.raises(ValueError):
         chunk_text("content", chunk_size=10, overlap=10)
+
+
+def test_chunk_text_uses_tokenizer_budget_when_requested() -> None:
+    chunks = chunk_text(
+        "alpha beta gamma delta epsilon zeta eta theta",
+        chunk_size=4,
+        overlap=1,
+        tokenizer="cl100k_base",
+    )
+
+    assert len(chunks) > 1
+    assert chunks[0].startswith("alpha")
+
+
+def test_apply_context_budget_preserves_ranked_order_and_budget() -> None:
+    chunks = [
+        {"chunk_id": "a", "content": "first", "token_count": 3, "score": 0.9},
+        {"chunk_id": "b", "content": "second", "token_count": 4, "score": 0.8},
+        {"chunk_id": "c", "content": "third", "token_count": 2, "score": 0.7},
+    ]
+
+    assert [chunk["chunk_id"] for chunk in apply_context_budget(chunks, 5)] == ["a"]
 
 
 def test_rank_chunks_scores_and_sorts_matches() -> None:

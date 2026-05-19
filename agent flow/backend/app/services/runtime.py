@@ -1,8 +1,10 @@
+import asyncio
 import hashlib
 import importlib.util
 import inspect
 import ipaddress
 import json
+import random
 import re
 import socket
 import sys
@@ -19,7 +21,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.services import knowledge_processing
-from app.services.secrets import get_secret_value, resolve_openai_api_key
+from app.services.secrets import get_secret_value, resolve_deepseek_api_key, resolve_openai_api_key
 
 Graph = dict[str, Any]
 State = dict[str, Any]
@@ -40,12 +42,34 @@ _SENSITIVE_KEYWORDS = {
     "secret",
     "password",
 }
+_MISSING = object()
+_NODE_DEFAULT_TIMEOUT_SECONDS = {
+    "llm": 60.0,
+    "knowledge_base": 30.0,
+    "api": 30.0,
+    "intent": 30.0,
+}
 
 
 class WorkflowCodeError(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class RuntimeNodeError(Exception):
+    def __init__(
+        self,
+        error_code: str,
+        message: str | None = None,
+        *,
+        retryable: bool = False,
+        error_detail: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message or error_code)
+        self.error_code = error_code
+        self.retryable = retryable
+        self.error_detail = error_detail or {}
 
 
 @dataclass(frozen=True)
@@ -83,20 +107,7 @@ class GeneratedWorkflowContext:
             "input_mapping": input_mapping,
             "output_mapping": output_mapping,
         }
-        node_input = _build_node_input(node, self.state)
-        started = time.perf_counter()
-        node_run_id = await _create_node_run(self._conn, self.run_id, node, node_input)
-        try:
-            output = await _execute_node(self._conn, node, self.state, node_input)
-            self.state["outputs"][node_id] = output
-            _apply_output_mapping(node, output, self.state)
-            duration_ms = int((time.perf_counter() - started) * 1000)
-            await _mark_node_success(self._conn, node_run_id, output, duration_ms)
-            return output
-        except Exception as exc:
-            duration_ms = int((time.perf_counter() - started) * 1000)
-            await _mark_node_failed(self._conn, node_run_id, exc, duration_ms)
-            raise
+        return await _execute_node_with_retry(self._conn, self.run_id, node, self.state)
 
     def get_state(self) -> State:
         return self.state
@@ -134,6 +145,7 @@ async def execute_generated_workflow_sync(
             "execution_mode": "sync",
             "runtime": "generated_workflow",
             "code_path_at_run": code_path,
+            "code_hash_published": code_hash,
             "code_hash_at_run": None,
             "code_modified": None,
         },
@@ -159,6 +171,7 @@ async def execute_generated_workflow_sync(
                 "execution_mode": "sync",
                 "runtime": "generated_workflow",
                 "code_path_at_run": _relative_project_path(generated.code_path),
+                "code_hash_published": code_hash,
                 "code_hash_at_run": generated.code_hash_at_run,
                 "code_modified": generated.code_modified,
             },
@@ -204,7 +217,8 @@ async def execute_generated_workflow_sync(
     except WorkflowCodeError as exc:
         await _mark_run_failed(conn, run_id, exc.code, str(exc), state)
     except Exception as exc:  # pragma: no cover - defensive runtime boundary
-        await _mark_run_failed(conn, run_id, exc.__class__.__name__, str(exc), state)
+        error_code, error_message = _workflow_error_info(exc)
+        await _mark_run_failed(conn, run_id, error_code, error_message, state)
 
     result = await conn.execute(
         text("SELECT * FROM workflow_runs WHERE id = :run_id"),
@@ -236,6 +250,7 @@ async def create_generated_workflow_run_pending(
             "runtime": "generated_workflow",
             "queue": "redis_list",
             "code_path_at_run": code_path,
+            "code_hash_published": code_hash,
             "code_hash_at_run": code_hash,
             "code_modified": None,
         },
@@ -288,6 +303,7 @@ async def execute_pending_generated_workflow_run(
                 "execution_mode": metadata.get("execution_mode", "async"),
                 "runtime": "generated_workflow",
                 "code_path_at_run": _relative_project_path(generated.code_path),
+                "code_hash_published": run.get("code_hash"),
                 "code_hash_at_run": generated.code_hash_at_run,
                 "code_modified": generated.code_modified,
             }
@@ -334,7 +350,8 @@ async def execute_pending_generated_workflow_run(
     except WorkflowCodeError as exc:
         await _mark_run_failed(conn, run_id, exc.code, str(exc), state)
     except Exception as exc:  # pragma: no cover - defensive runtime boundary
-        await _mark_run_failed(conn, run_id, exc.__class__.__name__, str(exc), state)
+        error_code, error_message = _workflow_error_info(exc)
+        await _mark_run_failed(conn, run_id, error_code, error_message, state)
 
     result = await conn.execute(
         text("SELECT * FROM workflow_runs WHERE id = :run_id"),
@@ -397,6 +414,7 @@ async def execute_workflow_sync(
             {"run_id": run_id, "output_json": output, "state_json": state},
         )
     except Exception as exc:  # pragma: no cover - defensive runtime boundary
+        error_code, error_message = _workflow_error_info(exc)
         await conn.execute(
             _jsonb_stmt(
                 """
@@ -413,8 +431,8 @@ async def execute_workflow_sync(
             ),
             {
                 "run_id": run_id,
-                "error_code": exc.__class__.__name__,
-                "error_message": str(exc),
+                "error_code": error_code,
+                "error_message": error_message,
                 "state_json": state,
             },
         )
@@ -455,26 +473,325 @@ async def _execute_graph(
 
         node = nodes[node_id]
         state["path"].append(node_id)
-        node_input = _build_node_input(node, state)
-        started = time.perf_counter()
-        node_run_id = await _create_node_run(conn, run_id, node, node_input)
-
         try:
-            output = await _execute_node(conn, node, state, node_input)
-            state["outputs"][node_id] = output
-            _apply_output_mapping(node, output, state)
-            duration_ms = int((time.perf_counter() - started) * 1000)
-            await _mark_node_success(conn, node_run_id, output, duration_ms)
-        except Exception as exc:
-            duration_ms = int((time.perf_counter() - started) * 1000)
-            await _mark_node_failed(conn, node_run_id, exc, duration_ms)
-            raise
+            await _execute_node_with_retry(conn, run_id, node, state)
+        except RuntimeNodeError as exc:
+            node_id = await _next_node_after_error(
+                conn,
+                run_id,
+                node,
+                outgoing.get(node_id, []),
+                nodes,
+                state,
+                exc,
+            )
+            if node_id is None:
+                state["final_output"] = state.get("final_output") or _fallback_output(state)
+                break
+            continue
 
         if node.get("type") == "end":
             state["final_output"] = state.get("final_output") or _fallback_output(state)
             break
 
         node_id = _next_node_id(node, outgoing.get(node_id, []), state)
+
+
+async def _execute_node_with_retry(
+    conn: AsyncConnection,
+    run_id: int,
+    node: dict[str, Any],
+    state: State,
+) -> dict[str, Any]:
+    retry_policy = _node_retry_policy(node)
+    max_attempts = retry_policy["max_attempts"]
+    last_error: RuntimeNodeError | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        node_input = _build_node_input(node, state)
+        started = time.perf_counter()
+        node_run_id = await _create_node_run(conn, run_id, node, node_input, attempt=attempt)
+        try:
+            output = await _execute_node_with_timeout(conn, node, state, node_input)
+            state["outputs"][node["id"]] = output
+            _apply_output_mapping(node, output, state)
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            await _mark_node_success(conn, node_run_id, output, duration_ms)
+            await _persist_run_state(conn, run_id, state)
+            return output
+        except Exception as exc:
+            error = _normalize_node_error(exc, node)
+            error.error_detail.setdefault("attempt", attempt)
+            last_error = error
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            will_retry = _should_retry_node(error, retry_policy, attempt)
+            await _mark_node_failed(
+                conn,
+                node_run_id,
+                error,
+                duration_ms,
+                will_retry=will_retry,
+            )
+            if not will_retry:
+                raise error from exc
+            await _sleep_before_retry(retry_policy, attempt)
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeNodeError("unknown_error", "node execution failed without an attempt")
+
+
+async def _execute_node_with_timeout(
+    conn: AsyncConnection,
+    node: dict[str, Any],
+    state: State,
+    node_input: dict[str, Any],
+) -> dict[str, Any]:
+    timeout_seconds = _node_timeout_seconds(node)
+    try:
+        return await asyncio.wait_for(
+            _execute_node(conn, node, state, node_input),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError as exc:
+        raise RuntimeNodeError(
+            "timeout",
+            f"node timed out after {timeout_seconds:g} seconds",
+            retryable=True,
+            error_detail={"timeout_seconds": timeout_seconds},
+        ) from exc
+
+
+async def _next_node_after_error(
+    conn: AsyncConnection,
+    run_id: int,
+    node: dict[str, Any],
+    outgoing_edges: list[dict[str, Any]],
+    nodes: dict[str, dict[str, Any]],
+    state: State,
+    error: RuntimeNodeError,
+) -> str | None:
+    on_error = _node_on_error(node)
+    strategy = str(on_error.get("strategy") or "fail_workflow")
+    if strategy == "fail_workflow":
+        raise error
+
+    _record_last_error(node, state, error)
+    await _persist_run_state(conn, run_id, state)
+
+    if strategy == "skip_node":
+        return _first_outgoing_target(outgoing_edges)
+
+    if strategy == "go_to_node":
+        target = on_error.get("target")
+        if not isinstance(target, str) or not target:
+            raise RuntimeNodeError(
+                "invalid_config",
+                "on_error.target is required when strategy=go_to_node",
+            ) from error
+        if target not in nodes:
+            raise RuntimeNodeError(
+                "branch_target_not_found",
+                f"on_error target not found: {target}",
+            ) from error
+        return target
+
+    raise RuntimeNodeError(
+        "invalid_config",
+        f"unsupported on_error strategy: {strategy}",
+    ) from error
+
+
+def _node_on_error(node: dict[str, Any]) -> dict[str, Any]:
+    config = node.get("config") or {}
+    on_error = node.get("on_error") or config.get("on_error") or {}
+    if not isinstance(on_error, dict):
+        raise RuntimeNodeError("invalid_config", "on_error must be an object")
+    return on_error
+
+
+def _record_last_error(node: dict[str, Any], state: State, error: RuntimeNodeError) -> None:
+    state.setdefault("metadata", {})["last_error"] = {
+        "node_id": node.get("id"),
+        "node_type": node.get("type"),
+        "error_code": error.error_code,
+        "error_message": str(error),
+        "attempt": error.error_detail.get("attempt"),
+    }
+
+
+def _first_outgoing_target(outgoing_edges: list[dict[str, Any]]) -> str | None:
+    if not outgoing_edges:
+        return None
+    return outgoing_edges[0].get("target")
+
+
+def _node_retry_policy(node: dict[str, Any]) -> dict[str, Any]:
+    retry = node.get("retry") or {}
+    if not isinstance(retry, dict):
+        raise RuntimeNodeError("invalid_config", "retry must be an object")
+    raw_max_attempts = retry.get("max_attempts", 1)
+    try:
+        max_attempts = max(1, int(raw_max_attempts))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeNodeError("invalid_config", "retry.max_attempts must be an integer") from exc
+
+    retry_on = retry.get("retry_on")
+    if retry_on is None:
+        retry_on_set: set[str] | None = None
+    elif isinstance(retry_on, list):
+        retry_on_set = {str(item) for item in retry_on}
+    else:
+        raise RuntimeNodeError("invalid_config", "retry.retry_on must be a list")
+
+    return {
+        "max_attempts": max_attempts,
+        "backoff": str(retry.get("backoff") or "none").lower(),
+        "delay_seconds": float(
+            retry.get("delay_seconds")
+            or retry.get("interval_seconds")
+            or retry.get("fixed_delay_seconds")
+            or 0
+        ),
+        "max_delay_seconds": float(retry.get("max_delay_seconds") or 30),
+        "jitter": _as_bool(retry.get("jitter"), default=False),
+        "retry_on": retry_on_set,
+    }
+
+
+def _node_timeout_seconds(node: dict[str, Any]) -> float:
+    config = node.get("config") or {}
+    raw_timeout = node.get("timeout", config.get("timeout", config.get("timeout_seconds")))
+    if raw_timeout in {None, ""}:
+        return _NODE_DEFAULT_TIMEOUT_SECONDS.get(str(node.get("type")), 10.0)
+    try:
+        timeout_seconds = float(raw_timeout)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeNodeError("invalid_config", "timeout must be a number") from exc
+    if timeout_seconds <= 0:
+        raise RuntimeNodeError("invalid_config", "timeout must be greater than 0")
+    return timeout_seconds
+
+
+def _should_retry_node(
+    error: RuntimeNodeError,
+    retry_policy: dict[str, Any],
+    attempt: int,
+) -> bool:
+    if attempt >= retry_policy["max_attempts"]:
+        return False
+    if not error.retryable:
+        return False
+    retry_on: set[str] | None = retry_policy["retry_on"]
+    return retry_on is None or error.error_code in retry_on
+
+
+async def _sleep_before_retry(retry_policy: dict[str, Any], attempt: int) -> None:
+    backoff = retry_policy["backoff"]
+    if backoff == "none":
+        return
+    delay = retry_policy["delay_seconds"] or 1.0
+    if backoff == "fixed":
+        if retry_policy["jitter"]:
+            delay = random.uniform(0, delay)
+        await asyncio.sleep(delay)
+        return
+    if backoff == "exponential":
+        delay = min(delay * (2 ** (attempt - 1)), retry_policy["max_delay_seconds"])
+        if retry_policy["jitter"]:
+            delay = random.uniform(0, delay)
+        await asyncio.sleep(delay)
+        return
+    raise RuntimeNodeError("invalid_config", f"unsupported retry backoff: {backoff}")
+
+
+def _normalize_node_error(exc: Exception, node: dict[str, Any] | None = None) -> RuntimeNodeError:
+    if isinstance(exc, RuntimeNodeError):
+        return exc
+    node_type = str((node or {}).get("type") or "")
+    status_code = getattr(exc, "status_code", None)
+    if status_code is not None:
+        return _normalize_status_error(int(status_code), str(exc), node_type)
+    class_name = exc.__class__.__name__.lower()
+    if "ratelimit" in class_name or "rate_limit" in class_name:
+        return RuntimeNodeError("rate_limit", str(exc), retryable=True)
+    if "connection" in class_name and node_type == "llm":
+        return RuntimeNodeError("llm_provider_error", str(exc), retryable=True)
+    if isinstance(exc, TimeoutError):
+        return RuntimeNodeError("timeout", str(exc) or "node timed out", retryable=True)
+    if isinstance(exc, httpx.TimeoutException):
+        return RuntimeNodeError("timeout", str(exc), retryable=True)
+    if isinstance(exc, httpx.HTTPStatusError):
+        return _normalize_http_status_error(exc)
+    if isinstance(exc, (httpx.ConnectError, httpx.NetworkError)):
+        return RuntimeNodeError("network_error", str(exc), retryable=True)
+    if isinstance(exc, httpx.RequestError):
+        return RuntimeNodeError("api_request_error", str(exc), retryable=True)
+    if isinstance(exc, ValueError):
+        return RuntimeNodeError("invalid_config", str(exc))
+
+    if node_type == "llm":
+        return RuntimeNodeError("llm_provider_error", str(exc), retryable=True)
+    if node_type == "knowledge_base":
+        return RuntimeNodeError("knowledge_base_error", str(exc), retryable=True)
+    if node_type == "api":
+        return RuntimeNodeError("api_request_error", str(exc), retryable=True)
+    return RuntimeNodeError("unknown_error", str(exc) or exc.__class__.__name__)
+
+
+def _normalize_http_status_error(exc: httpx.HTTPStatusError) -> RuntimeNodeError:
+    status_code = exc.response.status_code
+    return _normalize_status_error(status_code, str(exc), "api")
+
+
+def _normalize_status_error(status_code: int, message: str, node_type: str) -> RuntimeNodeError:
+    if status_code == 429:
+        return RuntimeNodeError(
+            "rate_limit",
+            message,
+            retryable=True,
+            error_detail={"status_code": status_code},
+        )
+    if 500 <= status_code:
+        error_code = "llm_provider_error" if node_type == "llm" else "api_response_error"
+        return RuntimeNodeError(
+            error_code,
+            message,
+            retryable=True,
+            error_detail={"status_code": status_code},
+        )
+    if 400 <= status_code:
+        error_code = "llm_provider_error" if node_type == "llm" else "api_response_error"
+        return RuntimeNodeError(
+            error_code,
+            message,
+            retryable=False,
+            error_detail={"status_code": status_code},
+        )
+    return RuntimeNodeError(
+        "unknown_error",
+        message,
+        retryable=False,
+        error_detail={"status_code": status_code},
+    )
+
+
+def _as_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _workflow_error_info(exc: Exception) -> tuple[str, str]:
+    if isinstance(exc, RuntimeNodeError):
+        return exc.error_code, str(exc)
+    if isinstance(exc, WorkflowCodeError):
+        return exc.code, str(exc)
+    return "unknown_error", str(exc) or exc.__class__.__name__
 
 
 def _build_node_input(node: dict[str, Any], state: State) -> dict[str, Any]:
@@ -491,7 +808,12 @@ async def _execute_node(
     node_input: dict[str, Any],
 ) -> dict[str, Any]:
     node_type = node.get("type")
-    config = node.get("config") or {}
+    raw_config = node.get("config") or {}
+    config = (
+        raw_config
+        if node_type == "api"
+        else _resolve_value_with_node_input(raw_config, state, node_input)
+    )
 
     if node_type == "start":
         return {"started": True}
@@ -508,14 +830,17 @@ async def _execute_node(
     if node_type == "intent":
         return await _execute_intent_node(conn, config, state, node_input)
     if node_type == "branch":
-        return {"selected": _next_branch_target(node, state)}
+        selected = _next_branch_target({**node, "config": config}, state)
+        if not selected:
+            raise RuntimeNodeError("branch_no_match", "Branch node did not match any target")
+        return {"selected": selected}
     if node_type == "output":
         output = _resolve_value(config.get("outputs", state.get("variables", {})), state)
         state["final_output"] = output if isinstance(output, dict) else {"result": output}
         return state["final_output"]
     if node_type == "end":
         return {"completed": True}
-    return {"result": None}
+    raise RuntimeNodeError("invalid_config", f"unsupported node type: {node_type}")
 
 
 async def _execute_knowledge_base_node(
@@ -531,6 +856,11 @@ async def _execute_knowledge_base_node(
     )
     top_k = int(config.get("top_k") or config.get("topK") or 5)
     score_threshold = float(config.get("score_threshold") or 0.0)
+    context_budget_tokens = (
+        int(config["context_budget_tokens"])
+        if config.get("context_budget_tokens") not in {None, ""}
+        else None
+    )
     raw_ids = config.get("knowledge_base_ids")
     if raw_ids is None and config.get("knowledge_base_id") is not None:
         raw_ids = [config.get("knowledge_base_id")]
@@ -544,23 +874,39 @@ async def _execute_knowledge_base_node(
 
     chunks: list[dict[str, Any]] = []
     for knowledge_base_id in knowledge_base_ids:
-        chunks.extend(
-            await knowledge_processing.retrieve_chunks(
-                conn,
-                knowledge_base_id=knowledge_base_id,
-                query=str(query),
-                top_k=top_k,
-                score_threshold=score_threshold,
+        try:
+            chunks.extend(
+                await knowledge_processing.retrieve_chunks(
+                    conn,
+                    knowledge_base_id=knowledge_base_id,
+                    query=str(query),
+                    top_k=top_k,
+                    score_threshold=score_threshold,
+                )
             )
-        )
+        except RuntimeNodeError:
+            raise
+        except Exception as exc:
+            raise RuntimeNodeError(
+                "knowledge_base_error",
+                str(exc) or "knowledge base retrieval failed",
+                retryable=True,
+                error_detail={"knowledge_base_id": knowledge_base_id},
+            ) from exc
     chunks = sorted(chunks, key=lambda item: item.get("score", 0), reverse=True)[:top_k]
+    chunks = knowledge_processing.apply_context_budget(chunks, context_budget_tokens)
     state["variables"]["kb_context"] = chunks
     return {
         "chunks": chunks,
+        "returned_chunks": len(chunks),
         "query": query,
         "knowledge_base_ids": knowledge_base_ids,
         "top_k": top_k,
         "score_threshold": score_threshold,
+        "context_budget_tokens": context_budget_tokens,
+        "retrieval_modes": sorted(
+            {str(chunk.get("retrieval_mode")) for chunk in chunks if chunk.get("retrieval_mode")}
+        ),
     }
 
 
@@ -570,49 +916,158 @@ async def _execute_llm_node(
     state: State,
     node_input: dict[str, Any],
 ) -> dict[str, Any]:
-    provider = str(config.get("provider") or "mock").lower()
-    model = str(config.get("model") or ("local-mock" if provider == "mock" else "gpt-4.1-mini"))
-    prompt = _resolve_value(config.get("user_prompt") or config.get("prompt") or "", state)
-    system_prompt = _resolve_value(config.get("system_prompt") or "", state)
+    model_binding = await _resolve_llm_model_binding(conn, config)
+    effective_config = {
+        **model_binding.get("default_config", {}),
+        **config,
+    }
+    provider = str(
+        model_binding.get("provider_type") or effective_config.get("provider") or "mock"
+    ).lower()
+    model = str(
+        model_binding.get("model_name")
+        or effective_config.get("model")
+        or ("local-mock" if provider in {"mock", "local", "local-mock"} else "gpt-4.1-mini")
+    )
+    prompt = _resolve_value(
+        effective_config.get("user_prompt") or effective_config.get("prompt") or "",
+        state,
+    )
+    system_prompt = _resolve_value(effective_config.get("system_prompt") or "", state)
     question = state.get("input", {}).get("user_query") or node_input.get("question") or prompt
 
-    if provider == "mock":
+    if provider in {"mock", "local", "local-mock"}:
         return {
             "answer": f"模拟回答：{question}",
-            "provider": "mock",
+            "provider": provider,
             "model": model,
+            "model_config_id": model_binding.get("model_config_id"),
             "prompt": prompt,
         }
 
-    if provider != "openai":
-        raise ValueError(f"unsupported_llm_provider:{provider}")
+    if provider not in {"openai", "deepseek"}:
+        raise RuntimeNodeError("invalid_config", f"unsupported LLM provider: {provider}")
 
-    api_key = await resolve_openai_api_key(conn)
+    provider_config = model_binding.get("provider_config")
+    api_key = (
+        await resolve_deepseek_api_key(conn, provider_config)
+        if provider == "deepseek"
+        else await resolve_openai_api_key(conn, provider_config)
+    )
     if not api_key:
-        raise RuntimeError("OpenAI API key is required for provider=openai")
+        raise RuntimeNodeError(
+            "permission_denied",
+            f"{provider.title()} API key is required for provider={provider}",
+        )
 
     try:
         from openai import AsyncOpenAI
     except ImportError as exc:  # pragma: no cover - dependency is declared in pyproject
-        raise RuntimeError("openai package is not installed") from exc
+        raise RuntimeNodeError("invalid_config", "openai package is not installed") from exc
 
-    client = AsyncOpenAI(api_key=api_key, timeout=float(config.get("timeout_seconds") or 30))
+    base_url = effective_config.get("base_url") or model_binding.get("provider_base_url")
+    if provider == "deepseek" and not base_url:
+        base_url = "https://api.deepseek.com"
+    client_kwargs: dict[str, Any] = {
+        "api_key": api_key,
+        "timeout": float(effective_config.get("timeout_seconds") or 30),
+    }
+    if base_url:
+        client_kwargs["base_url"] = str(base_url)
+    client = AsyncOpenAI(**client_kwargs)
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": str(system_prompt)})
     messages.append({"role": "user", "content": str(prompt or question)})
-    response = await client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=float(config.get("temperature", 0.2)),
-    )
-    answer = response.choices[0].message.content or ""
+    request_kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": float(effective_config.get("temperature", 0.2)),
+        "max_tokens": int(effective_config.get("max_tokens") or 1000),
+    }
+    if provider == "deepseek":
+        thinking = effective_config.get("thinking")
+        if isinstance(thinking, dict):
+            request_kwargs["extra_body"] = {"thinking": thinking}
+        else:
+            thinking_mode = effective_config.get("thinking_mode", False)
+            if isinstance(thinking_mode, str):
+                thinking_mode = thinking_mode.strip().lower() in {"1", "true", "yes", "enabled"}
+            request_kwargs["extra_body"] = {
+                "thinking": {"type": "enabled" if thinking_mode else "disabled"},
+            }
+
+    try:
+        response = await client.chat.completions.create(**request_kwargs)
+    except Exception as exc:
+        raise _normalize_node_error(exc, {"type": "llm"}) from exc
+    message = response.choices[0].message
+    answer = message.content or ""
+    reasoning_content = getattr(message, "reasoning_content", None)
     return {
         "answer": answer,
-        "provider": "openai",
+        "reasoning_content": reasoning_content,
+        "provider": provider,
         "model": model,
+        "model_config_id": model_binding.get("model_config_id"),
         "prompt": prompt,
         "usage": response.usage.model_dump() if response.usage else None,
+    }
+
+
+async def _resolve_llm_model_binding(
+    conn: AsyncConnection,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    raw_model_config_id = config.get("model_config_id") or config.get("modelConfigId")
+    if raw_model_config_id in {None, ""}:
+        return {
+            "model_config_id": None,
+            "provider_type": None,
+            "provider_config": {},
+            "model_name": None,
+            "default_config": {},
+        }
+
+    try:
+        model_config_id = int(raw_model_config_id)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeNodeError("invalid_config", "model_config_id must be an integer") from exc
+
+    result = await conn.execute(
+        text(
+            """
+            SELECT
+              mc.id AS model_config_id,
+              mc.model_name,
+              mc.default_config_json,
+              mp.provider_type,
+              mp.base_url AS provider_base_url,
+              mp.config_json AS provider_config
+            FROM model_configs mc
+            JOIN model_providers mp ON mp.id = mc.provider_id
+            WHERE mc.id = :model_config_id
+              AND mc.model_type = 'chat'
+              AND mc.status = 'active'
+              AND mp.status = 'active'
+            """
+        ),
+        {"model_config_id": model_config_id},
+    )
+    row = result.mappings().one_or_none()
+    if row is None:
+        raise RuntimeNodeError(
+            "invalid_config",
+            f"model_config_id not found or inactive: {model_config_id}",
+        )
+    model_config = dict(row)
+    return {
+        "model_config_id": model_config["model_config_id"],
+        "provider_type": model_config["provider_type"],
+        "provider_base_url": model_config.get("provider_base_url"),
+        "provider_config": model_config.get("provider_config") or {},
+        "model_name": model_config["model_name"],
+        "default_config": model_config.get("default_config_json") or {},
     }
 
 
@@ -659,32 +1114,38 @@ async def _classify_intent_with_openai(
 ) -> dict[str, Any]:
     api_key = await resolve_openai_api_key(conn)
     if not api_key:
-        raise RuntimeError("OpenAI API key is required for intent provider=openai")
+        raise RuntimeNodeError(
+            "permission_denied",
+            "OpenAI API key is required for intent provider=openai",
+        )
     from openai import AsyncOpenAI
 
     model = str(config.get("model"))
     client = AsyncOpenAI(api_key=api_key, timeout=float(config.get("timeout_seconds") or 20))
-    response = await client.chat.completions.create(
-        model=model,
-        response_format={"type": "json_object"},
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Classify the user query into one intent. Return JSON with "
-                    "intent and confidence. If unsure use the fallback intent."
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {"query": query, "intents": intents, "fallback_intent": fallback},
-                    ensure_ascii=False,
-                ),
-            },
-        ],
-        temperature=0,
-    )
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Classify the user query into one intent. Return JSON with "
+                        "intent and confidence. If unsure use the fallback intent."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"query": query, "intents": intents, "fallback_intent": fallback},
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            temperature=0,
+        )
+    except Exception as exc:
+        raise _normalize_node_error(exc, {"type": "llm"}) from exc
     raw = response.choices[0].message.content or "{}"
     parsed = json.loads(raw)
     allowed = {str(item.get("name")) for item in intents if isinstance(item, dict)}
@@ -727,13 +1188,40 @@ def _classify_intent_by_keywords(
 def _apply_output_mapping(node: dict[str, Any], output: dict[str, Any], state: State) -> None:
     mapping = node.get("output_mapping") or {}
     for source_key, destination in mapping.items():
-        value = output.get(source_key)
+        if source_key not in output:
+            raise RuntimeNodeError(
+                "output_mapping_error",
+                f"Output field not found: {source_key}",
+                error_detail={"source_key": source_key, "destination": destination},
+            )
+        value = output[source_key]
         if not isinstance(destination, str):
-            continue
+            raise RuntimeNodeError(
+                "output_mapping_error",
+                f"Invalid output mapping destination for {source_key}",
+                error_detail={"source_key": source_key, "destination": destination},
+            )
         if destination.startswith("variables."):
             _set_path(state["variables"], destination.removeprefix("variables."), value)
+        elif destination.startswith("outputs."):
+            _set_path(state["outputs"], destination.removeprefix("outputs."), value)
         elif destination == "messages":
-            state.setdefault("messages", []).append(_message_value(value))
+            messages = value if isinstance(value, list) else [value]
+            state.setdefault("messages", []).extend(_message_value(item) for item in messages)
+        elif destination == "outputs":
+            if not isinstance(value, dict):
+                raise RuntimeNodeError(
+                    "output_mapping_error",
+                    "outputs mapping destination requires an object value",
+                    error_detail={"source_key": source_key, "destination": destination},
+                )
+            state["outputs"].update(value)
+        else:
+            raise RuntimeNodeError(
+                "output_mapping_error",
+                f"Unsupported output mapping destination: {destination}",
+                error_detail={"source_key": source_key, "destination": destination},
+            )
 
     if node.get("type") == "llm" and "answer" in output:
         state["variables"].setdefault("answer", output["answer"])
@@ -769,6 +1257,12 @@ def _next_node_id(
     if node.get("type") == "branch":
         target = _next_branch_target(node, state)
         if target:
+            outgoing_targets = {edge.get("target") for edge in outgoing_edges}
+            if target not in outgoing_targets:
+                raise RuntimeNodeError(
+                    "branch_target_not_found",
+                    f"Branch target has no outgoing edge: {target}",
+                )
             return target
     if not outgoing_edges:
         return None
@@ -857,27 +1351,44 @@ async def _execute_api_node(
     state: State,
     node_input: dict[str, Any],
 ) -> dict[str, Any]:
-    request = await _resolve_value_for_request(conn, config, state)
+    request = await _resolve_value_for_request(conn, config, state, node_input)
     safe_request = _redact_secrets_in_value(config)
-    safe_request = _resolve_value(safe_request, state)
+    safe_request = _resolve_value_with_node_input(safe_request, state, node_input)
     mode = str(request.get("mode") or request.get("execution_mode") or "mock").lower()
     method = str(request.get("method") or "GET").upper()
     url = request.get("url") or request.get("endpoint")
     body = request.get("body", node_input)
     headers = request.get("headers") or {}
+    query_params = request.get("query_params") or request.get("params") or {}
     timeout_seconds = min(max(float(request.get("timeout_seconds") or 10), 0.1), 30.0)
+    max_response_bytes = int(request.get("max_response_bytes") or 1024 * 1024)
+    fail_on_http_error = _as_bool(request.get("fail_on_http_error"), default=True)
+    fail_on_request_error = _as_bool(request.get("fail_on_request_error"), default=True)
+    response_path = request.get("response_path")
+    success_status_codes = {
+        int(status)
+        for status in request.get("success_status_codes", [])
+        if str(status).strip()
+    }
 
     if mode == "http":
         safe_url = safe_request.get("url") or safe_request.get("endpoint")
         safe_headers = safe_request.get("headers") or {}
         safe_body = safe_request.get("body", node_input)
+        safe_query_params = safe_request.get("query_params") or safe_request.get("params") or {}
         error = _validate_public_http_url(str(url or ""))
         if error:
             return {
                 "mode": "http",
                 "status": "blocked",
                 "status_code": None,
-                "request": _request_payload(method, safe_url, safe_headers, safe_body),
+                "request": _request_payload(
+                    method,
+                    safe_url,
+                    safe_headers,
+                    safe_body,
+                    safe_query_params,
+                ),
                 "response": None,
                 "error": error,
             }
@@ -886,26 +1397,50 @@ async def _execute_api_node(
                 timeout=httpx.Timeout(timeout_seconds),
                 follow_redirects=False,
             ) as client:
-                response = await client.request(method, str(url), headers=headers, json=body)
-            response_body: Any
-            try:
-                response_body = response.json()
-            except ValueError:
-                response_body = response.text[:8192]
+                response = await client.request(
+                    method,
+                    str(url),
+                    headers=headers,
+                    json=body,
+                    params=query_params,
+                )
+            response_body = _decode_http_response(response, max_response_bytes)
+            if fail_on_http_error and not _http_status_is_success(
+                response.status_code,
+                success_status_codes,
+            ):
+                raise _api_response_error(response.status_code, response_body)
+            extracted_response = _extract_response_path(response_body, response_path)
             return {
                 "mode": "http",
                 "status": "success",
                 "status_code": response.status_code,
-                "request": _request_payload(method, safe_url, safe_headers, safe_body),
-                "response": response_body,
+                "request": _request_payload(
+                    method,
+                    safe_url,
+                    safe_headers,
+                    safe_body,
+                    safe_query_params,
+                ),
+                "response": extracted_response,
                 "error": None,
             }
+        except RuntimeNodeError:
+            raise
         except Exception as exc:
+            if fail_on_request_error:
+                raise _normalize_node_error(exc, {"type": "api"}) from exc
             return {
                 "mode": "http",
                 "status": "error",
                 "status_code": None,
-                "request": _request_payload(method, safe_url, safe_headers, safe_body),
+                "request": _request_payload(
+                    method,
+                    safe_url,
+                    safe_headers,
+                    safe_body,
+                    safe_query_params,
+                ),
                 "response": None,
                 "error": f"{exc.__class__.__name__}: {exc}",
             }
@@ -913,22 +1448,83 @@ async def _execute_api_node(
     safe_body = safe_request.get("body", node_input)
     safe_headers = safe_request.get("headers") or {}
     safe_url = safe_request.get("url") or safe_request.get("endpoint")
+    safe_query_params = safe_request.get("query_params") or safe_request.get("params") or {}
+    mock_response = _extract_response_path(
+        request.get("mock_response", {"ok": True}),
+        response_path,
+    )
     return {
         "mode": "mock",
         "status": "mocked",
         "status_code": int(request.get("mock_status_code", 200)),
-        "request": _request_payload(method, safe_url, safe_headers, safe_body),
-        "response": request.get("mock_response", {"ok": True}),
+        "request": _request_payload(method, safe_url, safe_headers, safe_body, safe_query_params),
+        "response": mock_response,
     }
 
 
-def _request_payload(method: str, url: Any, headers: Any, body: Any) -> dict[str, Any]:
+def _request_payload(
+    method: str,
+    url: Any,
+    headers: Any,
+    body: Any,
+    query_params: Any = None,
+) -> dict[str, Any]:
     return {
         "method": method,
         "url": url,
+        "query_params": _redact_sensitive_mapping(query_params or {}),
         "headers": _redact_sensitive_mapping(headers),
         "body": body,
     }
+
+
+def _decode_http_response(response: httpx.Response, max_response_bytes: int) -> Any:
+    if len(response.content) > max_response_bytes:
+        raise RuntimeNodeError(
+            "response_too_large",
+            f"API response exceeded {max_response_bytes} bytes",
+            error_detail={
+                "status_code": response.status_code,
+                "max_response_bytes": max_response_bytes,
+            },
+        )
+    try:
+        return response.json()
+    except ValueError:
+        return response.text[:8192]
+
+
+def _http_status_is_success(status_code: int, success_status_codes: set[int]) -> bool:
+    if success_status_codes:
+        return status_code in success_status_codes
+    return 200 <= status_code < 300
+
+
+def _api_response_error(status_code: int, response_body: Any) -> RuntimeNodeError:
+    error = _normalize_status_error(status_code, f"API returned HTTP {status_code}", "api")
+    error.error_detail["response_preview"] = _safe_response_preview(response_body)
+    return error
+
+
+def _safe_response_preview(value: Any) -> Any:
+    redacted = _redact_sensitive_mapping(value) if isinstance(value, dict) else value
+    preview = str(redacted)
+    return preview[:500]
+
+
+def _extract_response_path(response_body: Any, response_path: Any) -> Any:
+    if response_path in {None, ""}:
+        return response_body
+    if not isinstance(response_path, str):
+        raise RuntimeNodeError("invalid_config", "response_path must be a string")
+    try:
+        return _get_path(response_path, response_body)
+    except RuntimeNodeError as exc:
+        raise RuntimeNodeError(
+            "api_response_error",
+            f"response_path not found: {response_path}",
+            error_detail={"response_path": response_path},
+        ) from exc
 
 
 def _validate_public_http_url(url: str) -> str | None:
@@ -961,23 +1557,28 @@ def _validate_public_http_url(url: str) -> str | None:
     return None
 
 
-async def _resolve_value_for_request(conn: AsyncConnection, value: Any, state: State) -> Any:
+async def _resolve_value_for_request(
+    conn: AsyncConnection,
+    value: Any,
+    state: State,
+    node_input: dict[str, Any],
+) -> Any:
     if isinstance(value, dict):
         return {
-            key: await _resolve_value_for_request(conn, item, state)
+            key: await _resolve_value_for_request(conn, item, state, node_input)
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [await _resolve_value_for_request(conn, item, state) for item in value]
+        return [await _resolve_value_for_request(conn, item, state, node_input) for item in value]
     if not isinstance(value, str):
         return value
 
     full_match = _PLACEHOLDER_RE.fullmatch(value)
     if full_match:
-        return await _get_request_path(conn, full_match.group(1).strip(), state)
+        return await _get_request_path(conn, full_match.group(1).strip(), state, node_input)
 
     async def resolve_match(match: re.Match[str]) -> str:
-        resolved = await _get_request_path(conn, match.group(1).strip(), state)
+        resolved = await _get_request_path(conn, match.group(1).strip(), state, node_input)
         return "" if resolved is None else str(resolved)
 
     parts: list[str] = []
@@ -990,10 +1591,18 @@ async def _resolve_value_for_request(conn: AsyncConnection, value: Any, state: S
     return "".join(parts)
 
 
-async def _get_request_path(conn: AsyncConnection, path: str, state: State) -> Any:
+async def _get_request_path(
+    conn: AsyncConnection,
+    path: str,
+    state: State,
+    node_input: dict[str, Any],
+) -> Any:
     if path.startswith("secrets."):
-        return await get_secret_value(conn, path.removeprefix("secrets."))
-    return _get_path(path, state)
+        value = await get_secret_value(conn, path.removeprefix("secrets."))
+        if value is None:
+            raise RuntimeNodeError("permission_denied", f"Secret not found: {path}")
+        return value
+    return _get_path_with_node_input(path, state, node_input)
 
 
 def _redact_secrets_in_value(value: Any) -> Any:
@@ -1080,8 +1689,8 @@ def _resolve_value_with_node_input(value: Any, state: State, node_input: dict[st
 
 
 def _get_path_with_node_input(path: str, state: State, node_input: dict[str, Any]) -> Any:
-    resolved = _get_path(path, state)
-    if resolved is not None:
+    resolved = _try_get_path(path, state)
+    if resolved is not _MISSING:
         return resolved
     if path.startswith("node_input."):
         return _get_path(path.removeprefix("node_input."), node_input)
@@ -1089,12 +1698,25 @@ def _get_path_with_node_input(path: str, state: State, node_input: dict[str, Any
 
 
 def _get_path(path: str, state: State) -> Any:
+    resolved = _try_get_path(path, state)
+    if resolved is _MISSING:
+        raise RuntimeNodeError(
+            "variable_not_found",
+            f"Variable not found: {path}",
+            error_detail={"path": path},
+        )
+    return resolved
+
+
+def _try_get_path(path: str, state: State) -> Any:
     current: Any = state
     for part in path.split("."):
         if isinstance(current, dict):
-            current = current.get(part)
+            if part not in current:
+                return _MISSING
+            current = current[part]
         else:
-            return None
+            return _MISSING
     return current
 
 
@@ -1110,6 +1732,8 @@ def _node_metadata(node: dict[str, Any]) -> dict[str, Any]:
         "runtime": "graph_runtime",
         "node_type": node.get("type"),
         "provider": config.get("provider"),
+        "model": config.get("model"),
+        "model_config_id": config.get("model_config_id") or config.get("modelConfigId"),
         "mode": config.get("mode") or config.get("execution_mode"),
     }
     return {key: value for key, value in metadata.items() if value is not None}
@@ -1213,11 +1837,28 @@ async def _mark_run_failed(
     )
 
 
+async def _persist_run_state(conn: AsyncConnection, run_id: int, state: State) -> None:
+    await conn.execute(
+        _jsonb_stmt(
+            """
+            UPDATE workflow_runs
+            SET state_json = :state_json,
+                updated_at = now()
+            WHERE id = :run_id
+            """,
+            "state_json",
+        ),
+        {"run_id": run_id, "state_json": state},
+    )
+
+
 async def _create_node_run(
     conn: AsyncConnection,
     run_id: int,
     node: dict[str, Any],
     node_input: dict[str, Any],
+    *,
+    attempt: int = 1,
 ) -> int:
     result = await conn.execute(
         _jsonb_stmt(
@@ -1228,6 +1869,7 @@ async def _create_node_run(
               node_type,
               node_name,
               status,
+              attempt,
               input_json,
               metadata_json,
               started_at
@@ -1238,6 +1880,7 @@ async def _create_node_run(
               :node_type,
               :node_name,
               'running',
+              :attempt,
               :input_json,
               :metadata_json,
               now()
@@ -1252,6 +1895,7 @@ async def _create_node_run(
             "node_id": node["id"],
             "node_type": node["type"],
             "node_name": node.get("name"),
+            "attempt": attempt,
             "input_json": node_input,
             "metadata_json": _node_metadata(node),
         },
@@ -1265,12 +1909,7 @@ async def _mark_node_success(
     output: dict[str, Any],
     duration_ms: int,
 ) -> None:
-    metadata_json = {
-        "runtime": "graph_runtime",
-        "status_code": output.get("status_code"),
-        "provider": output.get("provider"),
-        "mode": output.get("mode"),
-    }
+    metadata_json = _node_success_metadata(output, duration_ms)
     await conn.execute(
         _jsonb_stmt(
             """
@@ -1296,28 +1935,61 @@ async def _mark_node_success(
     )
 
 
+def _node_success_metadata(output: dict[str, Any], duration_ms: int) -> dict[str, Any]:
+    request = output.get("request") if isinstance(output.get("request"), dict) else {}
+    usage = output.get("usage") if isinstance(output.get("usage"), dict) else None
+    metadata = {
+        "runtime": "graph_runtime",
+        "status_code": output.get("status_code"),
+        "provider": output.get("provider"),
+        "model": output.get("model"),
+        "model_config_id": output.get("model_config_id"),
+        "mode": output.get("mode"),
+        "method": request.get("method"),
+        "url": request.get("url"),
+        "duration_ms": duration_ms,
+        "token_usage": usage,
+        "knowledge_base_ids": output.get("knowledge_base_ids"),
+        "top_k": output.get("top_k"),
+        "returned_chunks": output.get("returned_chunks"),
+        "retrieval_modes": output.get("retrieval_modes"),
+    }
+    return {key: value for key, value in metadata.items() if value is not None}
+
+
 async def _mark_node_failed(
     conn: AsyncConnection,
     node_run_id: int,
     exc: Exception,
     duration_ms: int,
+    *,
+    will_retry: bool = False,
 ) -> None:
+    error = _normalize_node_error(exc)
     await conn.execute(
-        text(
+        _jsonb_stmt(
             """
             UPDATE node_runs
-            SET status = 'failed',
+            SET status = :status,
                 error_code = :error_code,
                 error_message = :error_message,
+                metadata_json = COALESCE(metadata_json, '{}'::jsonb) || :metadata_json,
                 duration_ms = :duration_ms,
                 ended_at = now()
             WHERE id = :node_run_id
-            """
+            """,
+            "metadata_json",
         ),
         {
             "node_run_id": node_run_id,
-            "error_code": exc.__class__.__name__,
-            "error_message": str(exc),
+            "status": "retrying" if will_retry else "failed",
+            "error_code": error.error_code,
+            "error_message": str(error),
+            "metadata_json": {
+                "retryable": error.retryable,
+                "will_retry": will_retry,
+                "error_detail": error.error_detail,
+            },
             "duration_ms": duration_ms,
         },
     )

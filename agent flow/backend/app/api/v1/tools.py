@@ -1,3 +1,4 @@
+import re
 import time
 from typing import Any, Literal
 
@@ -9,8 +10,10 @@ from app.api.v1.schemas import CreateToolRequest, TestToolRequest
 from app.core.config import get_settings
 from app.infra.db.session import engine
 from app.services.audit import write_audit_log
+from app.services.secrets import get_secret_value
 
 router = APIRouter(prefix="/tools", tags=["tools"])
+_PLACEHOLDER_RE = re.compile(r"{{\s*([^}]+)\s*}}")
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -136,6 +139,17 @@ async def test_tool(tool_id: int, payload: TestToolRequest) -> dict[str, Any]:
     settings = get_settings()
     async with engine.begin() as conn:
         tool = await _get_tool_row(conn, tool_id)
+        resolved_config = await _resolve_tool_value(
+            conn,
+            tool.get("config_json") or {},
+            payload.input,
+        )
+        safe_config = await _resolve_tool_value(
+            conn,
+            tool.get("config_json") or {},
+            payload.input,
+            redact_secrets=True,
+        )
         await write_audit_log(
             conn,
             actor_user_id=settings.mock_user_id,
@@ -144,7 +158,13 @@ async def test_tool(tool_id: int, payload: TestToolRequest) -> dict[str, Any]:
             resource_id=tool_id,
             detail={"input_keys": sorted(payload.input.keys())},
         )
-    return mock_tool_test_result(tool, payload.input, started_at=started)
+    return mock_tool_test_result(
+        tool,
+        payload.input,
+        started_at=started,
+        resolved_config=resolved_config,
+        safe_config=safe_config,
+    )
 
 
 def mock_tool_test_result(
@@ -152,6 +172,8 @@ def mock_tool_test_result(
     tool_input: dict[str, Any],
     *,
     started_at: float | None = None,
+    resolved_config: dict[str, Any] | None = None,
+    safe_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     duration_ms = int((time.perf_counter() - (started_at or time.perf_counter())) * 1000)
     return {
@@ -163,10 +185,92 @@ def mock_tool_test_result(
             "tool_id": tool.get("id"),
             "tool_name": tool.get("name"),
             "input": tool_input,
-            "config": tool.get("config_json") or {},
+            "config": safe_config if safe_config is not None else tool.get("config_json") or {},
+            "resolved": resolved_config is not None,
         },
         "error_message": None,
     }
+
+
+async def _resolve_tool_value(
+    conn,
+    value: Any,
+    tool_input: dict[str, Any],
+    *,
+    redact_secrets: bool = False,
+) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: await _resolve_tool_value(conn, item, tool_input, redact_secrets=redact_secrets)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            await _resolve_tool_value(conn, item, tool_input, redact_secrets=redact_secrets)
+            for item in value
+        ]
+    if not isinstance(value, str):
+        return value
+
+    full_match = _PLACEHOLDER_RE.fullmatch(value)
+    if full_match:
+        return await _resolve_tool_path(
+            conn,
+            full_match.group(1).strip(),
+            tool_input,
+            redact_secrets=redact_secrets,
+        )
+
+    async def replace_match(match: re.Match[str]) -> str:
+        resolved = await _resolve_tool_path(
+            conn,
+            match.group(1).strip(),
+            tool_input,
+            redact_secrets=redact_secrets,
+        )
+        return "" if resolved is None else str(resolved)
+
+    parts: list[str] = []
+    cursor = 0
+    for match in _PLACEHOLDER_RE.finditer(value):
+        parts.append(value[cursor : match.start()])
+        parts.append(await replace_match(match))
+        cursor = match.end()
+    parts.append(value[cursor:])
+    return "".join(parts)
+
+
+async def _resolve_tool_path(
+    conn,
+    path: str,
+    tool_input: dict[str, Any],
+    *,
+    redact_secrets: bool,
+) -> Any:
+    if path.startswith("secrets."):
+        secret_key = path.removeprefix("secrets.").strip()
+        if redact_secrets:
+            return "***"
+        secret_value = await get_secret_value(conn, secret_key)
+        if secret_value is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"secret not found or inactive: {secret_key}",
+            )
+        return secret_value
+    if path.startswith("input."):
+        return _get_path(path.removeprefix("input."), tool_input)
+    return _get_path(path, tool_input)
+
+
+def _get_path(path: str, value: dict[str, Any]) -> Any:
+    current: Any = value
+    for part in path.split("."):
+        if isinstance(current, dict):
+            current = current.get(part)
+        else:
+            return None
+    return current
 
 
 async def _get_tool_row(conn, tool_id: int) -> dict[str, Any]:

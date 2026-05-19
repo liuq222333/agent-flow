@@ -20,6 +20,7 @@ tags:
   - name: Models
   - name: Secrets
   - name: Node Types
+  - name: Ops
   - name: Health
 
 paths:
@@ -66,6 +67,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReadinessResponse"
+
+  /metrics:
+    get:
+      tags: [Health]
+      summary: Prometheus metrics
+      description: Exposes workflow run, node run, Redis queue, worker heartbeat, and scrape error metrics.
+      security: []
+      responses:
+        "200":
+          description: Prometheus text exposition
+          content:
+            text/plain:
+              schema:
+                type: string
 
   /workflows:
     post:
@@ -243,6 +258,67 @@ paths:
         default:
           $ref: "#/components/responses/ErrorResponse"
 
+  /workflow-versions/{version_id}/code:
+    get:
+      tags: [Workflow Versions]
+      summary: Get generated workflow source
+      description: Returns the local generated workflow.py source and current hash status for a published version.
+      parameters:
+        - $ref: "#/components/parameters/VersionId"
+      responses:
+        "200":
+          description: Generated workflow source
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowVersionCodeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /workflow-versions/{version_id}/regenerate-code:
+    post:
+      tags: [Workflow Versions]
+      summary: Regenerate generated workflow code
+      description: Regenerates workflow.py for a published version when code metadata or files are missing; force=true replaces existing local code.
+      parameters:
+        - $ref: "#/components/parameters/VersionId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegenerateWorkflowCodeRequest"
+      responses:
+        "200":
+          description: Regeneration result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegenerateWorkflowCodeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /generated-workflows/cleanup:
+    post:
+      tags: [Ops]
+      summary: Cleanup unreferenced generated workflow files
+      description: Removes temporary, orphan version, and empty workflow directories under backend/generated_workflows.
+      parameters:
+        - name: dry_run
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Cleanup report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeneratedWorkflowCleanupResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
   /workflows/{workflow_id}/run:
     post:
       tags: [Runs]
@@ -376,6 +452,29 @@ paths:
                     format: int64
                   status:
                     $ref: "#/components/schemas/WorkflowRunStatus"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /runs/{run_id}/retry:
+    post:
+      tags: [Runs]
+      summary: Retry failed or cancelled workflow run
+      description: Creates a new async workflow run from a failed or cancelled run, optionally overriding input.
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetryRunRequest"
+      responses:
+        "200":
+          description: Created retry run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetryRunResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
 
@@ -811,6 +910,81 @@ paths:
         default:
           $ref: "#/components/responses/ErrorResponse"
 
+  /ops/workers:
+    get:
+      tags: [Ops]
+      summary: List active workflow workers
+      description: Returns recent worker heartbeat records for async workflow execution.
+      parameters:
+        - name: active_seconds
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 86400
+            default: 120
+      responses:
+        "200":
+          description: Active worker list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpsWorkersResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /ops/queues:
+    get:
+      tags: [Ops]
+      summary: Get workflow run queue depths
+      description: Returns Redis queue depths for the workflow run main, processing, and dead-letter queues.
+      responses:
+        "200":
+          description: Workflow queue status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpsQueueStatus"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /ops/queues/workflow_runs/dead:
+    get:
+      tags: [Ops]
+      summary: List workflow run dead-letter jobs
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Dead-letter workflow run jobs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpsDeadWorkflowRunJobsResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /ops/queues/workflow_runs/recover:
+    post:
+      tags: [Ops]
+      summary: Recover workflow run queues
+      description: Requeues stale pending jobs, acknowledges terminal processing jobs, and fails stale running workflow runs.
+      responses:
+        "200":
+          description: Recovery result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpsWorkflowRunRecoveryResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -935,6 +1109,134 @@ components:
             redis: ok
             encryption_key: ok
             default_model_provider: ok
+
+    OpsWorker:
+      type: object
+      required: [worker_id, worker_type, queue_name, status, last_seen_at]
+      properties:
+        worker_id:
+          type: string
+        worker_type:
+          type: string
+          example: workflow
+        queue_name:
+          type: string
+          example: workflow_runs
+        status:
+          type: string
+          enum: [idle, busy, stopping, error]
+        current_run_id:
+          type: integer
+          format: int64
+          nullable: true
+        current_job_id:
+          type: string
+          nullable: true
+        hostname:
+          type: string
+          nullable: true
+        pid:
+          type: integer
+          nullable: true
+        metadata_json:
+          $ref: "#/components/schemas/JsonObject"
+        last_seen_at:
+          $ref: "#/components/schemas/Timestamp"
+        last_seen_epoch:
+          type: integer
+          format: int64
+
+    OpsWorkersResponse:
+      type: object
+      required: [workers, metadata]
+      properties:
+        workers:
+          type: array
+          items:
+            $ref: "#/components/schemas/OpsWorker"
+        metadata:
+          type: object
+          required: [table_exists, active_seconds]
+          properties:
+            table_exists:
+              type: boolean
+            active_seconds:
+              type: integer
+
+    OpsQueueStatus:
+      type: object
+      required: [queue_name, main_depth, processing_depth, dead_letter_depth]
+      properties:
+        queue_name:
+          type: string
+          example: workflow_runs
+        main_depth:
+          type: integer
+          minimum: 0
+        processing_depth:
+          type: integer
+          minimum: 0
+        dead_letter_depth:
+          type: integer
+          minimum: 0
+
+    OpsDeadWorkflowRunJobsResponse:
+      type: object
+      required: [queue_name, limit, items]
+      properties:
+        queue_name:
+          type: string
+          example: workflow_runs
+        limit:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/JsonObject"
+
+    OpsWorkflowRunRecoveryResponse:
+      type: object
+      required: [processing_jobs, stale_workflow_runs]
+      properties:
+        processing_jobs:
+          type: object
+          required: [requeued, acked_terminal, skipped_running, invalid_payloads]
+          properties:
+            requeued:
+              type: array
+              items:
+                type: integer
+                format: int64
+            acked_terminal:
+              type: array
+              items:
+                type: integer
+                format: int64
+            skipped_running:
+              type: array
+              items:
+                type: integer
+                format: int64
+            invalid_payloads:
+              type: integer
+        stale_workflow_runs:
+          type: object
+          required: [requeued, failed, requeue_errors]
+          properties:
+            requeued:
+              type: array
+              items:
+                type: integer
+                format: int64
+            failed:
+              type: array
+              items:
+                type: integer
+                format: int64
+            requeue_errors:
+              type: array
+              items:
+                $ref: "#/components/schemas/JsonObject"
 
     WorkflowStatus:
       type: string
@@ -1174,6 +1476,13 @@ components:
         release_note:
           type: string
 
+    RegenerateWorkflowCodeRequest:
+      type: object
+      properties:
+        force:
+          type: boolean
+          default: false
+
     PublishWorkflowResponse:
       type: object
       properties:
@@ -1224,6 +1533,16 @@ components:
         code_hash:
           type: string
           description: Hash of the generated workflow.py recorded at publish time.
+        code_hash_actual:
+          type: string
+          nullable: true
+          description: Current local workflow.py hash when inspected.
+        code_modified:
+          type: boolean
+          description: Whether the local workflow.py hash differs from the published hash.
+        code_status:
+          type: string
+          enum: [ok, modified, missing_metadata, missing_file, invalid_path]
         code_generated_at:
           $ref: "#/components/schemas/Timestamp"
         created_at:
@@ -1236,6 +1555,83 @@ components:
           properties:
             graph_json:
               $ref: "#/components/schemas/WorkflowGraph"
+
+    WorkflowVersionCodeResponse:
+      type: object
+      required: [id, workflow_id, version, code_path, code_status, source]
+      properties:
+        id:
+          type: integer
+          format: int64
+        workflow_id:
+          type: integer
+          format: int64
+        version:
+          type: integer
+        schema_version:
+          type: string
+        code_path:
+          type: string
+        code_hash:
+          type: string
+          nullable: true
+        code_hash_actual:
+          type: string
+          nullable: true
+        code_modified:
+          type: boolean
+        code_status:
+          type: string
+          enum: [ok, modified, missing_metadata, missing_file, invalid_path]
+        code_generated_at:
+          $ref: "#/components/schemas/Timestamp"
+        source:
+          type: string
+
+    RegenerateWorkflowCodeResponse:
+      allOf:
+        - $ref: "#/components/schemas/WorkflowVersionDetail"
+        - type: object
+          properties:
+            regenerated:
+              type: boolean
+            previous_code_status:
+              type: string
+              enum: [ok, modified, missing_metadata, missing_file, invalid_path]
+
+    GeneratedWorkflowCleanupResponse:
+      type: object
+      required:
+        - dry_run
+        - removed_temp_dirs
+        - removed_orphan_version_dirs
+        - removed_empty_workflow_dirs
+        - kept_version_dirs
+        - removed_total
+        - kept_total
+      properties:
+        dry_run:
+          type: boolean
+        removed_temp_dirs:
+          type: array
+          items:
+            type: string
+        removed_orphan_version_dirs:
+          type: array
+          items:
+            type: string
+        removed_empty_workflow_dirs:
+          type: array
+          items:
+            type: string
+        kept_version_dirs:
+          type: array
+          items:
+            type: string
+        removed_total:
+          type: integer
+        kept_total:
+          type: integer
 
     WorkflowVersionListResponse:
       type: object
@@ -1269,6 +1665,15 @@ components:
           enum: [sync, async]
           default: sync
 
+    RetryRunRequest:
+      type: object
+      properties:
+        input:
+          $ref: "#/components/schemas/JsonObject"
+        reason:
+          type: string
+          maxLength: 500
+
     RunWorkflowResponse:
       type: object
       properties:
@@ -1283,6 +1688,15 @@ components:
           $ref: "#/components/schemas/Timestamp"
         ended_at:
           $ref: "#/components/schemas/Timestamp"
+
+    RetryRunResponse:
+      allOf:
+        - $ref: "#/components/schemas/RunWorkflowResponse"
+        - type: object
+          properties:
+            retry_of_run_id:
+              type: integer
+              format: int64
 
     WorkflowRunDetail:
       type: object

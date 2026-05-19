@@ -2,18 +2,13 @@
 
 import {
   Activity,
-  Bot,
   BookOpen,
   CheckCircle2,
-  CircleStop,
-  Cpu,
   Database,
   EyeOff,
   FileJson,
   GitBranch,
   KeyRound,
-  LogIn,
-  LogOut,
   MessageSquare,
   Play,
   Plus,
@@ -23,361 +18,181 @@ import {
   Save,
   Search,
   SquareTerminal,
-  TextCursorInput,
   Trash2,
   Upload,
   Wrench,
-  type LucideIcon,
 } from "lucide-react";
 import {
   Background,
   Controls,
   MiniMap,
   ReactFlow,
-  applyEdgeChanges,
   applyNodeChanges,
-  type Connection,
-  type Edge,
-  type EdgeChange,
   type Node,
   type NodeChange,
   type ReactFlowInstance,
 } from "@xyflow/react";
-import { type ChangeEvent, type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  type ChangeEvent,
+  type FormEvent,
+  type MouseEvent as ReactMouseEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
+import {
+  adminSections,
+  apiBaseUrl,
+  defaultKnowledgeForm,
+  defaultRunInput,
+  emptyFlowEdges,
+  emptyGraph,
+  nodeCatalog,
+  nodeDropMoveThreshold,
+} from "./workflow-editor/constants";
+import {
+  createApiMessageDemoGraph,
+  createIntentBranchDemoGraph,
+  createKnowledgeDemoGraph,
+} from "./workflow-editor/demo-graphs";
+import { NodeDragPreviewLayer } from "./workflow-editor/components/node-drag-preview-layer";
+import {
+  AdminHeader,
+  NodeConfigPanel,
+  RunHistoryView,
+  TraceView,
+  ValidationView,
+  VersionCodePanel,
+} from "./workflow-editor/components/panels";
+import { WorkflowEdgeOverlay } from "./workflow-editor/components/workflow-edge-overlay";
+import { workflowNodeTypes } from "./workflow-editor/components/workflow-node-view";
+import type {
+  ActiveSection,
+  ApiTool,
+  GeneratedWorkflowCleanupReport,
+  GraphEdge,
+  GraphNode,
+  InspectorTab,
+  JsonNodeField,
+  JsonObject,
+  KnowledgeBase,
+  KnowledgeChunk,
+  KnowledgeDocument,
+  ModelConfig,
+  ModelConfigDraft,
+  ModelProvider,
+  ModelProviderDraft,
+  NodeDragPreview,
+  NodeEdgeAnchors,
+  NodeType,
+  OpsDeadJob,
+  OpsQueue,
+  OpsWorker,
+  PendingConnection,
+  RunListItem,
+  RunMode,
+  RunTrace,
+  Secret,
+  SecretDraft,
+  ToolDraft,
+  ValidationResult,
+  Workflow,
+  WorkflowGraph,
+  WorkflowVersion,
+  WorkflowVersionCode,
+} from "./workflow-editor/types";
+import {
+  areNodeEdgeAnchorsEqual,
+  createGraphNode,
+  fetchWithTimeout,
+  findFlowNodeIdAtClientPoint,
+  formatBytes,
+  formatDate,
+  getConnectionError,
+  getDefaultNextNodeType,
+  getNodeEdgePoint,
+  getRunId,
+  graphToFlowNodes,
+  groupNodeCatalog,
+  isClientPointInsideElement,
+  makeEdgeId,
+  nodeChangeHasId,
+  parseJsonObject,
+  stringifyJson,
+} from "./workflow-editor/utils";
 
-type JsonObject = Record<string, unknown>;
-type NodeType =
-  | "start"
-  | "input"
-  | "llm"
-  | "knowledge_base"
-  | "intent"
-  | "branch"
-  | "api"
-  | "message"
-  | "output"
-  | "end";
-
-type GraphNode = {
-  id: string;
-  type: NodeType;
-  name: string;
-  description?: string | null;
-  position: { x: number; y: number };
-  config: JsonObject;
-  input_mapping?: JsonObject;
-  output_mapping?: JsonObject;
-  enabled?: boolean;
+const extractItems = <T,>(data: unknown, keys: string[]): T[] => {
+  if (Array.isArray(data)) {
+    return data as T[];
+  }
+  if (!data || typeof data !== "object") {
+    return [];
+  }
+  const record = data as Record<string, unknown>;
+  for (const key of keys) {
+    if (Array.isArray(record[key])) {
+      return record[key] as T[];
+    }
+  }
+  return [];
 };
 
-type GraphEdge = {
-  id: string;
-  source: string;
-  target: string;
-  label?: string;
+const extractNumber = (data: unknown, keys: string[]): number | null => {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+  const record = data as Record<string, unknown>;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number") {
+      return value;
+    }
+  }
+  return null;
 };
 
-type WorkflowGraph = {
-  schema_version: string;
-  nodes: GraphNode[];
-  edges: GraphEdge[];
+const readText = (record: JsonObject, keys: string[], fallback = "-") => {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" || typeof value === "number") {
+      return String(value);
+    }
+  }
+  return fallback;
 };
 
-type Workflow = {
-  id: number;
-  name: string;
-  description?: string | null;
-  status: "draft" | "published" | "archived";
-  current_version_id?: number | null;
-  current_version?: number | null;
-  draft_graph_json: WorkflowGraph;
-  updated_at: string;
-  latest_run?: { run_id: number; status: string; created_at: string } | null;
+const readNumber = (record: JsonObject, keys: string[]) => {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number") {
+      return value;
+    }
+  }
+  return 0;
 };
-
-type WorkflowVersion = {
-  id: number;
-  workflow_id: number;
-  version: number;
-  schema_version?: string | null;
-  release_note?: string | null;
-  code_path?: string | null;
-  code_hash?: string | null;
-  code_generated_at?: string | null;
-  created_at?: string | null;
-};
-
-type ActiveSection = "workflow" | "knowledge" | "tools" | "secrets" | "models";
-
-type KnowledgeBase = {
-  id: number;
-  name: string;
-  description?: string | null;
-  status: string;
-  embedding_model?: string | null;
-  embedding_dim?: number | null;
-  document_count?: number | null;
-  updated_at?: string | null;
-};
-
-type KnowledgeDocument = {
-  id: number;
-  file_name: string;
-  file_type?: string | null;
-  file_size?: number | null;
-  status: string;
-  created_at?: string | null;
-};
-
-type ApiTool = {
-  id: number;
-  name: string;
-  type: "api";
-  description?: string | null;
-  status: string;
-  config_json?: JsonObject | null;
-  updated_at?: string | null;
-};
-
-type Secret = {
-  id: number;
-  secret_key: string;
-  display_name?: string | null;
-  status: string;
-  key_version: number;
-  updated_at?: string | null;
-};
-
-type ModelProvider = {
-  id: number;
-  name: string;
-  provider_type: string;
-  base_url?: string | null;
-  status: string;
-  config_json?: JsonObject | null;
-};
-
-type ModelConfig = {
-  id: number;
-  provider_id: number;
-  model_name: string;
-  model_type: string;
-  display_name?: string | null;
-  context_window?: number | null;
-  default_config?: JsonObject | null;
-  status: string;
-};
-
-type ValidationResult = {
-  valid: boolean;
-  errors: Array<{ code: string; message: string; path: string; node_id?: string | null }>;
-  warnings: Array<{ code: string; message: string; path: string; node_id?: string | null }>;
-};
-
-type NodeRun = {
-  id: number;
-  node_id: string;
-  node_type: string;
-  node_name?: string | null;
-  status: string;
-  duration_ms?: number | null;
-  input_json?: JsonObject | null;
-  output_json?: JsonObject | null;
-  metadata_json?: JsonObject | null;
-  error_code?: string | null;
-  error_message?: string | null;
-};
-
-type RunTrace = {
-  run: {
-    id: number;
-    run_id?: number;
-    status: string;
-    output_json?: JsonObject | null;
-    metadata_json?: JsonObject | null;
-    error_code?: string | null;
-    error_message?: string | null;
-  };
-  nodes: NodeRun[];
-  graph_json: WorkflowGraph;
-};
-
-type RunListItem = {
-  id?: number;
-  run_id?: number;
-  status: string;
-  created_at?: string | null;
-};
-
-type RunMode = "sync" | "async";
-
-type KnowledgeChunk = {
-  id?: number;
-  chunk_id?: string;
-  document_id?: number;
-  chunk_index?: number;
-  content?: string;
-  text?: string;
-  score?: number;
-  metadata_json?: JsonObject | null;
-  source?: {
-    document_id?: number;
-    file_name?: string;
-    chunk_index?: number;
-    metadata_json?: JsonObject | null;
-  };
-};
-
-type NodeCatalogItem = {
-  type: NodeType;
-  label: string;
-  group: string;
-  Icon: LucideIcon;
-  config: JsonObject;
-  input_mapping?: JsonObject;
-  output_mapping?: JsonObject;
-};
-
-type JsonNodeField = "config" | "input_mapping" | "output_mapping";
-
-type ToolDraft = {
-  name: string;
-  description: string;
-  config: string;
-  error?: string | null;
-};
-
-type SecretDraft = {
-  display_name: string;
-  value: string;
-};
-
-const emptyGraph: WorkflowGraph = { schema_version: "1.0", nodes: [], edges: [] };
-const defaultRunInput = JSON.stringify({ user_query: "我想申请退款" }, null, 2);
-
-const nodeCatalog: NodeCatalogItem[] = [
-  { type: "start", label: "开始", group: "输入输出", Icon: CircleStop, config: {} },
-  {
-    type: "input",
-    label: "用户输入",
-    group: "输入输出",
-    Icon: TextCursorInput,
-    config: {
-      fields: [{ name: "user_query", type: "string", label: "用户问题", required: true }],
-    },
-    output_mapping: { user_query: "variables.user_query" },
-  },
-  {
-    type: "llm",
-    label: "生成回答",
-    group: "AI",
-    Icon: Bot,
-    config: {
-      provider: "mock",
-      model: "local-mock",
-      system_prompt: "你是一个本地调试助手。",
-      user_prompt: "问题：{{input.user_query}}",
-      temperature: 0.2,
-    },
-    output_mapping: { answer: "variables.answer" },
-  },
-  {
-    type: "knowledge_base",
-    label: "检索知识库",
-    group: "知识",
-    Icon: Database,
-    config: {
-      knowledge_base_ids: [],
-      query: "{{question}}",
-      retrieval_mode: "vector",
-      top_k: 5,
-      score_threshold: 0.65,
-      context_budget_tokens: 3000,
-    },
-    input_mapping: { question: "{{input.user_query}}" },
-    output_mapping: { chunks: "variables.kb_context" },
-  },
-  {
-    type: "intent",
-    label: "识别意图",
-    group: "AI",
-    Icon: LogIn,
-    config: {
-      model: "local-mock",
-      intents: [
-        { name: "refund_request", description: "用户申请退款" },
-        { name: "general_question", description: "普通咨询问题" },
-      ],
-      fallback_intent: "general_question",
-    },
-    input_mapping: { text: "{{input.user_query}}" },
-    output_mapping: {
-      intent: "variables.intent_result.intent",
-      confidence: "variables.intent_result.confidence",
-    },
-  },
-  { type: "branch", label: "条件分支", group: "控制流", Icon: GitBranch, config: { branches: [] } },
-  {
-    type: "api",
-    label: "调用 API",
-    group: "工具",
-    Icon: SquareTerminal,
-    config: {
-      method: "GET",
-      url: "",
-      headers: {},
-      query_params: {},
-      body: {},
-      response_path: "",
-      timeout: 30,
-    },
-    output_mapping: { response: "variables.api_response" },
-  },
-  {
-    type: "message",
-    label: "回复消息",
-    group: "消息",
-    Icon: MessageSquare,
-    config: { message_type: "text", template: "{{variables.answer}}" },
-    input_mapping: { answer: "{{variables.answer}}" },
-    output_mapping: { message: "messages" },
-  },
-  {
-    type: "output",
-    label: "最终输出",
-    group: "输入输出",
-    Icon: LogOut,
-    config: { outputs: { answer: "{{variables.answer}}" } },
-  },
-  { type: "end", label: "结束", group: "输入输出", Icon: CheckCircle2, config: {} },
-];
-
-const nodeJsonFieldLabels: Record<JsonNodeField, string> = {
-  config: "config JSON",
-  input_mapping: "input_mapping JSON",
-  output_mapping: "output_mapping JSON",
-};
-
-const adminSections: Array<{ id: ActiveSection; label: string; Icon: LucideIcon }> = [
-  { id: "workflow", label: "Workflow", Icon: GitBranch },
-  { id: "knowledge", label: "Knowledge", Icon: BookOpen },
-  { id: "tools", label: "Tools", Icon: Wrench },
-  { id: "secrets", label: "Secrets", Icon: KeyRound },
-  { id: "models", label: "Models", Icon: Cpu },
-];
 
 export default function Home() {
   const [activeSection, setActiveSection] = useState<ActiveSection>("workflow");
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null);
   const [currentVersionDetail, setCurrentVersionDetail] = useState<WorkflowVersion | null>(null);
+  const [workflowVersions, setWorkflowVersions] = useState<WorkflowVersion[]>([]);
+  const [currentVersionCode, setCurrentVersionCode] = useState<WorkflowVersionCode | null>(null);
+  const [selectedCodeVersion, setSelectedCodeVersion] = useState<WorkflowVersion | null>(null);
+  const [showCurrentVersionCode, setShowCurrentVersionCode] = useState(false);
+  const [generatedCleanupReport, setGeneratedCleanupReport] = useState<GeneratedWorkflowCleanupReport | null>(null);
   const [graph, setGraph] = useState<WorkflowGraph>(emptyGraph);
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
-  const [flowEdges, setFlowEdges] = useState<Edge[]>([]);
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance | null>(null);
+  const [pendingConnection, setPendingConnection] = useState<PendingConnection | null>(null);
+  const [nodeEdgeAnchors, setNodeEdgeAnchors] = useState<NodeEdgeAnchors>({});
+  const [nodeDragPreview, setNodeDragPreview] = useState<NodeDragPreview | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("config");
   const [nodeJsonDrafts, setNodeJsonDrafts] = useState<Record<JsonNodeField, string>>({
     config: "{}",
     input_mapping: "{}",
@@ -401,15 +216,12 @@ export default function Home() {
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [selectedKnowledgeBaseId, setSelectedKnowledgeBaseId] = useState<number | null>(null);
   const [knowledgeDocuments, setKnowledgeDocuments] = useState<KnowledgeDocument[]>([]);
-  const [knowledgeForm, setKnowledgeForm] = useState({
-    name: "",
-    description: "",
-    embedding_model: "local-embedding",
-  });
+  const [knowledgeForm, setKnowledgeForm] = useState(defaultKnowledgeForm);
   const [retrieveForm, setRetrieveForm] = useState({
     query: "",
     top_k: "5",
     score_threshold: "0",
+    context_budget_tokens: "3000",
   });
   const [retrieveResults, setRetrieveResults] = useState<KnowledgeChunk[]>([]);
   const [retrieveError, setRetrieveError] = useState<string | null>(null);
@@ -433,15 +245,94 @@ export default function Home() {
   const [secretDrafts, setSecretDrafts] = useState<Record<number, SecretDraft>>({});
   const [modelProviders, setModelProviders] = useState<ModelProvider[]>([]);
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
+  const [modelProviderForm, setModelProviderForm] = useState({
+    name: "deepseek",
+    provider_type: "deepseek",
+    base_url: "https://api.deepseek.com",
+    status: "active",
+    config: stringifyJson({ api_key_secret: "deepseek_api_key" }),
+  });
+  const [modelProviderConfigError, setModelProviderConfigError] = useState<string | null>(null);
+  const [modelProviderDrafts, setModelProviderDrafts] = useState<Record<number, ModelProviderDraft>>({});
+  const [modelConfigForm, setModelConfigForm] = useState({
+    provider_id: "",
+    model_name: "deepseek-v4-flash",
+    model_type: "chat",
+    display_name: "DeepSeek V4-Flash",
+    context_window: "1000000",
+    default_config: stringifyJson({
+      temperature: 0.3,
+      max_tokens: 1000,
+      model_version: "DeepSeek-V4-Flash",
+      api_model_alias: "deepseek-v4-flash",
+      thinking_mode: false,
+    }),
+    status: "active",
+  });
+  const [modelConfigError, setModelConfigError] = useState<string | null>(null);
+  const [modelConfigDrafts, setModelConfigDrafts] = useState<Record<number, ModelConfigDraft>>({});
+  const [opsQueues, setOpsQueues] = useState<OpsQueue[]>([]);
+  const [opsWorkers, setOpsWorkers] = useState<OpsWorker[]>([]);
+  const [opsDeadJobs, setOpsDeadJobs] = useState<OpsDeadJob[]>([]);
+  const [opsDeadCount, setOpsDeadCount] = useState(0);
+  const [opsRecoverResult, setOpsRecoverResult] = useState<string | null>(null);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const mouseDragRef = useRef<{ type: NodeType; startX: number; startY: number } | null>(null);
+  const pendingConnectionRef = useRef<PendingConnection | null>(null);
+  const ignoreNextNodeClickRef = useRef(false);
+
+  const navigationSections = useMemo(
+    () => [...adminSections, { id: "ops" as const, label: "Ops", Icon: Activity }],
+    [],
+  );
 
   const selectedVersion = selectedWorkflow?.current_version_id
-    ? `v${selectedWorkflow.current_version ?? selectedWorkflow.current_version_id}`
+    ? `v${currentVersionDetail?.version ?? selectedWorkflow.current_version ?? selectedWorkflow.current_version_id}`
     : "未发布";
 
   const selectedNode = useMemo(
     () => graph.nodes.find((node) => node.id === selectedNodeId) ?? null,
     [graph.nodes, selectedNodeId],
   );
+
+  const selectedEdge = useMemo(
+    () => graph.edges.find((edge) => edge.id === selectedEdgeId) ?? null,
+    [graph.edges, selectedEdgeId],
+  );
+
+  const selectedKnowledgeBase = useMemo(
+    () => knowledgeBases.find((knowledgeBase) => knowledgeBase.id === selectedKnowledgeBaseId) ?? null,
+    [knowledgeBases, selectedKnowledgeBaseId],
+  );
+
+  const hasProcessingKnowledgeDocuments = useMemo(
+    () =>
+      knowledgeDocuments.some((document) =>
+        ["uploaded", "parsing", "chunking", "embedding"].includes(document.status),
+      ),
+    [knowledgeDocuments],
+  );
+
+  const selectedEdgeEndpoints = useMemo(() => {
+    if (!selectedEdge) {
+      return null;
+    }
+    return {
+      source: graph.nodes.find((node) => node.id === selectedEdge.source) ?? null,
+      target: graph.nodes.find((node) => node.id === selectedEdge.target) ?? null,
+    };
+  }, [graph.nodes, selectedEdge]);
+
+  const selectGraphNode = useCallback((nodeId: string) => {
+    setSelectedNodeId(nodeId);
+    setSelectedEdgeId(null);
+    setInspectorTab("config");
+  }, []);
+
+  const clearCanvasSelection = useCallback(() => {
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
+  }, []);
 
   const traceStatusByNodeId = useMemo(() => {
     const statusMap = new Map<string, string>();
@@ -451,10 +342,238 @@ export default function Home() {
     return statusMap;
   }, [trace]);
 
+  const measureNodeEdgeAnchors = useCallback(() => {
+    if (!canvasRef.current || !flowInstance) {
+      return;
+    }
+
+    const nextAnchors: NodeEdgeAnchors = {};
+    canvasRef.current.querySelectorAll<HTMLElement>(".react-flow__node.flow-node").forEach((nodeElement) => {
+      const nodeId = nodeElement.getAttribute("data-id");
+      if (!nodeId) {
+        return;
+      }
+
+      const rect = nodeElement.getBoundingClientRect();
+      const centerY = rect.top + rect.height / 2;
+      nextAnchors[nodeId] = {
+        source: flowInstance.screenToFlowPosition({ x: rect.right, y: centerY }),
+        target: flowInstance.screenToFlowPosition({ x: rect.left, y: centerY }),
+      };
+    });
+
+    setNodeEdgeAnchors((currentAnchors) =>
+      areNodeEdgeAnchorsEqual(currentAnchors, nextAnchors) ? currentAnchors : nextAnchors,
+    );
+  }, [flowInstance]);
+
   useEffect(() => {
-    setFlowNodes((currentNodes) => graphToFlowNodes(graph, selectedNodeId, traceStatusByNodeId, currentNodes));
-    setFlowEdges((currentEdges) => graphToFlowEdges(graph, currentEdges));
-  }, [graph, selectedNodeId, traceStatusByNodeId]);
+    const frameId = window.requestAnimationFrame(measureNodeEdgeAnchors);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [flowNodes, graph.nodes, measureNodeEdgeAnchors, selectedNodeId]);
+
+  const connectGraphNodes = useCallback(
+    (sourceNodeId: string, targetNodeId: string) => {
+      const sourceNode = graph.nodes.find((node) => node.id === sourceNodeId);
+      const targetNode = graph.nodes.find((node) => node.id === targetNodeId);
+      const error = getConnectionError(graph, sourceNodeId, targetNodeId);
+      if (error || !sourceNode || !targetNode) {
+        setStatusLine(error ?? "未找到连线节点，请重新拖拽");
+        return;
+      }
+
+      const nextEdge: GraphEdge = {
+        id: makeEdgeId(sourceNodeId, targetNodeId, graph.edges.length),
+        source: sourceNodeId,
+        target: targetNodeId,
+        label: sourceNode.type === "branch" ? "branch" : undefined,
+      };
+      setGraph({ ...graph, edges: [...graph.edges, nextEdge] });
+      setSelectedEdgeId(nextEdge.id);
+      setSelectedNodeId(null);
+      setInspectorTab("config");
+      setTrace(null);
+      setStatusLine(`已连接：${sourceNode.name} -> ${targetNode.name}`);
+    },
+    [graph],
+  );
+
+  const deleteGraphEdge = useCallback(
+    (edgeId: string) => {
+      const edge = graph.edges.find((item) => item.id === edgeId);
+      setGraph({ ...graph, edges: graph.edges.filter((item) => item.id !== edgeId) });
+      setSelectedEdgeId(null);
+      setTrace(null);
+      setStatusLine(edge ? `已删除连线：${edge.source} -> ${edge.target}` : "已删除连线");
+    },
+    [graph],
+  );
+
+  const updateSelectedEdge = useCallback(
+    (patch: Partial<GraphEdge>) => {
+      if (!selectedEdgeId) {
+        return;
+      }
+      setGraph((currentGraph) => ({
+        ...currentGraph,
+        edges: currentGraph.edges.map((edge) => (edge.id === selectedEdgeId ? { ...edge, ...patch } : edge)),
+      }));
+      setTrace(null);
+    },
+    [selectedEdgeId],
+  );
+
+  useEffect(() => {
+    if (!selectedEdgeId) {
+      return undefined;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Backspace" && event.key !== "Delete") {
+        return;
+      }
+      event.preventDefault();
+      deleteGraphEdge(selectedEdgeId);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [deleteGraphEdge, selectedEdgeId]);
+
+  useEffect(() => {
+    if (selectedEdgeId && !graph.edges.some((edge) => edge.id === selectedEdgeId)) {
+      setSelectedEdgeId(null);
+    }
+  }, [graph.edges, selectedEdgeId]);
+
+  const quickAddConnectedNode = useCallback(
+    (sourceNodeId: string) => {
+      if (!selectedWorkflow || busyAction !== null) {
+        return;
+      }
+
+      const sourceNode = graph.nodes.find((node) => node.id === sourceNodeId);
+      if (!sourceNode) {
+        setStatusLine("未找到当前节点，无法添加后续节点");
+        return;
+      }
+      if (sourceNode.type === "end") {
+        setStatusLine("结束节点不能继续添加后续节点");
+        return;
+      }
+      if (sourceNode.type !== "branch" && graph.edges.some((edge) => edge.source === sourceNodeId)) {
+        setStatusLine("普通节点只能保留一条出边");
+        return;
+      }
+
+      const nextType = getDefaultNextNodeType(sourceNode.type);
+      const template = nodeCatalog.find((item) => item.type === nextType);
+      if (!template) {
+        return;
+      }
+
+      const sameTypeCount = graph.nodes.filter((node) => node.type === nextType).length;
+      const nextNode = createGraphNode(template, sameTypeCount + 1, graph.nodes.length, {
+        x: Math.round(sourceNode.position.x + 240),
+        y: Math.round(sourceNode.position.y),
+      });
+      const nextEdge: GraphEdge = {
+        id: makeEdgeId(sourceNode.id, nextNode.id, graph.edges.length),
+        source: sourceNode.id,
+        target: nextNode.id,
+        label: sourceNode.type === "branch" ? "branch" : undefined,
+      };
+
+      setGraph({
+        ...graph,
+        nodes: [...graph.nodes, nextNode],
+        edges: [...graph.edges, nextEdge],
+      });
+      setSelectedNodeId(nextNode.id);
+      setSelectedEdgeId(null);
+      setTrace(null);
+      setStatusLine(`已添加并连接节点：${template.label}`);
+    },
+    [busyAction, graph, selectedWorkflow],
+  );
+
+  const startManualConnection = useCallback(
+    (sourceNodeId: string, clientX: number, clientY: number) => {
+      if (!selectedWorkflow || busyAction !== null) {
+        return;
+      }
+
+      const sourceNode = graph.nodes.find((node) => node.id === sourceNodeId);
+      if (!sourceNode) {
+        return;
+      }
+
+      const from = nodeEdgeAnchors[sourceNodeId]?.source ?? getNodeEdgePoint(sourceNode, "source");
+      const to = flowInstance?.screenToFlowPosition({ x: clientX, y: clientY }) ?? from;
+      const pending: PendingConnection = {
+        sourceNodeId,
+        startClientX: clientX,
+        startClientY: clientY,
+        from,
+        to,
+      };
+      pendingConnectionRef.current = pending;
+      setPendingConnection(pending);
+
+      const handleMouseMove = (mouseEvent: MouseEvent) => {
+        const current = pendingConnectionRef.current;
+        if (!current) {
+          return;
+        }
+        const nextPending = {
+          ...current,
+          to: flowInstance?.screenToFlowPosition({ x: mouseEvent.clientX, y: mouseEvent.clientY }) ?? current.to,
+        };
+        pendingConnectionRef.current = nextPending;
+        setPendingConnection(nextPending);
+      };
+
+      const handleMouseUp = (mouseEvent: MouseEvent) => {
+        window.removeEventListener("mousemove", handleMouseMove);
+        window.removeEventListener("mouseup", handleMouseUp);
+        const current = pendingConnectionRef.current;
+        pendingConnectionRef.current = null;
+        setPendingConnection(null);
+
+        if (!current) {
+          return;
+        }
+        const moved = Math.hypot(mouseEvent.clientX - current.startClientX, mouseEvent.clientY - current.startClientY);
+        if (moved < nodeDropMoveThreshold) {
+          return;
+        }
+
+        const targetNodeId = findFlowNodeIdAtClientPoint(canvasRef.current, mouseEvent.clientX, mouseEvent.clientY);
+        if (!targetNodeId) {
+          setStatusLine("请把连线拖到目标节点上释放");
+          return;
+        }
+        connectGraphNodes(current.sourceNodeId, targetNodeId);
+      };
+
+      window.addEventListener("mousemove", handleMouseMove);
+      window.addEventListener("mouseup", handleMouseUp);
+    },
+    [busyAction, connectGraphNodes, flowInstance, graph.nodes, nodeEdgeAnchors, selectedWorkflow],
+  );
+
+  useEffect(() => {
+    setFlowNodes((currentNodes) =>
+      graphToFlowNodes(
+        graph,
+        selectedNodeId,
+        traceStatusByNodeId,
+        quickAddConnectedNode,
+        startManualConnection,
+        currentNodes,
+      ),
+    );
+  }, [graph, quickAddConnectedNode, selectedNodeId, startManualConnection, traceStatusByNodeId]);
 
   useEffect(() => {
     if (!selectedNode) {
@@ -471,33 +590,52 @@ export default function Home() {
     setNodeJsonErrors({ config: null, input_mapping: null, output_mapping: null });
   }, [selectedNodeId, selectedNode]);
 
+  const loadWorkflowVersions = useCallback(async (workflowId: number) => {
+    const response = await fetchWithTimeout(`${apiBaseUrl}/workflows/${workflowId}/versions?page_size=20`, {
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      throw new Error(`GET /workflows/${workflowId}/versions ${response.status}`);
+    }
+    const data = await response.json();
+    const items = (data.items ?? []) as WorkflowVersion[];
+    setWorkflowVersions(items);
+    return items;
+  }, []);
+
   const loadWorkflow = useCallback(async (workflowId: number) => {
-    const response = await fetch(`${apiBaseUrl}/workflows/${workflowId}`, { cache: "no-store" });
+    const response = await fetchWithTimeout(`${apiBaseUrl}/workflows/${workflowId}`, { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`GET /workflows/${workflowId} ${response.status}`);
     }
     const workflow = (await response.json()) as Workflow;
     let versionDetail: WorkflowVersion | null = null;
     if (workflow.current_version_id) {
-      const versionResponse = await fetch(`${apiBaseUrl}/workflow-versions/${workflow.current_version_id}`, {
+      const versionResponse = await fetchWithTimeout(`${apiBaseUrl}/workflow-versions/${workflow.current_version_id}`, {
         cache: "no-store",
       });
       if (versionResponse.ok) {
         versionDetail = (await versionResponse.json()) as WorkflowVersion;
       }
     }
+    const versions = await loadWorkflowVersions(workflowId).catch(() => []);
     setSelectedWorkflow(workflow);
     setCurrentVersionDetail(versionDetail);
+    setWorkflowVersions(versions);
+    setCurrentVersionCode(null);
+    setSelectedCodeVersion(null);
+    setShowCurrentVersionCode(false);
+    setGeneratedCleanupReport(null);
     setNameDraft(workflow.name);
     setDescriptionDraft(workflow.description ?? "");
     setGraph(workflow.draft_graph_json);
     setSelectedNodeId(null);
     setValidation(null);
     setTrace(null);
-  }, []);
+  }, [loadWorkflowVersions]);
 
   const loadRuns = useCallback(async (workflowId: number) => {
-    const response = await fetch(`${apiBaseUrl}/runs?workflow_id=${workflowId}&page_size=8`, { cache: "no-store" });
+    const response = await fetchWithTimeout(`${apiBaseUrl}/runs?workflow_id=${workflowId}&page_size=8`, { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`GET /runs?workflow_id=${workflowId} ${response.status}`);
     }
@@ -519,7 +657,7 @@ export default function Home() {
     async (preferredWorkflowId?: number) => {
       setBusyAction("refresh");
       try {
-        const response = await fetch(`${apiBaseUrl}/workflows`, { cache: "no-store" });
+        const response = await fetchWithTimeout(`${apiBaseUrl}/workflows`, { cache: "no-store" });
         if (!response.ok) {
           throw new Error(`GET /workflows ${response.status}`);
         }
@@ -551,10 +689,12 @@ export default function Home() {
     void loadWorkflows();
   }, [loadWorkflows]);
 
-  const loadKnowledge = useCallback(async (preferredKnowledgeBaseId?: number) => {
-    setBusyAction("knowledge");
+  const loadKnowledge = useCallback(async (preferredKnowledgeBaseId?: number, options?: { silent?: boolean }) => {
+    if (!options?.silent) {
+      setBusyAction("knowledge");
+    }
     try {
-      const response = await fetch(`${apiBaseUrl}/knowledge-bases`, { cache: "no-store" });
+      const response = await fetchWithTimeout(`${apiBaseUrl}/knowledge-bases`, { cache: "no-store" });
       if (!response.ok) {
         throw new Error(`GET /knowledge-bases ${response.status}`);
       }
@@ -564,7 +704,7 @@ export default function Home() {
       const nextId = preferredKnowledgeBaseId ?? items[0]?.id ?? null;
       setSelectedKnowledgeBaseId(nextId);
       if (nextId) {
-        const documentsResponse = await fetch(`${apiBaseUrl}/knowledge-bases/${nextId}/documents`, {
+        const documentsResponse = await fetchWithTimeout(`${apiBaseUrl}/knowledge-bases/${nextId}/documents`, {
           cache: "no-store",
         });
         if (documentsResponse.ok) {
@@ -576,36 +716,50 @@ export default function Home() {
       } else {
         setKnowledgeDocuments([]);
       }
-      setStatusLine("知识库已同步");
+      if (!options?.silent) {
+        setStatusLine("知识库已同步");
+      }
     } catch (error) {
-      setStatusLine(error instanceof Error ? error.message : "知识库同步失败");
+      if (!options?.silent) {
+        setStatusLine(error instanceof Error ? error.message : "知识库同步失败");
+      }
     } finally {
-      setBusyAction(null);
+      if (!options?.silent) {
+        setBusyAction(null);
+      }
     }
   }, []);
 
-  const loadKnowledgeDocuments = useCallback(async (kbId: number) => {
+  const loadKnowledgeDocuments = useCallback(async (kbId: number, options?: { silent?: boolean }) => {
     setSelectedKnowledgeBaseId(kbId);
-    setBusyAction("knowledge-documents");
+    if (!options?.silent) {
+      setBusyAction("knowledge-documents");
+    }
     try {
-      const response = await fetch(`${apiBaseUrl}/knowledge-bases/${kbId}/documents`, { cache: "no-store" });
+      const response = await fetchWithTimeout(`${apiBaseUrl}/knowledge-bases/${kbId}/documents`, { cache: "no-store" });
       if (!response.ok) {
         throw new Error(`GET /knowledge-bases/${kbId}/documents ${response.status}`);
       }
       const data = await response.json();
       setKnowledgeDocuments(data.items as KnowledgeDocument[]);
-      setStatusLine(`已载入知识库 #${kbId} 文档`);
+      if (!options?.silent) {
+        setStatusLine(`已载入知识库 #${kbId} 文档`);
+      }
     } catch (error) {
-      setStatusLine(error instanceof Error ? error.message : "文档同步失败");
+      if (!options?.silent) {
+        setStatusLine(error instanceof Error ? error.message : "文档同步失败");
+      }
     } finally {
-      setBusyAction(null);
+      if (!options?.silent) {
+        setBusyAction(null);
+      }
     }
   }, []);
 
   const loadTools = useCallback(async () => {
     setBusyAction("tools");
     try {
-      const response = await fetch(`${apiBaseUrl}/tools?type=api`, { cache: "no-store" });
+      const response = await fetchWithTimeout(`${apiBaseUrl}/tools?type=api`, { cache: "no-store" });
       if (!response.ok) {
         throw new Error(`GET /tools ${response.status}`);
       }
@@ -634,7 +788,7 @@ export default function Home() {
   const loadSecrets = useCallback(async () => {
     setBusyAction("secrets");
     try {
-      const response = await fetch(`${apiBaseUrl}/secrets`, { cache: "no-store" });
+      const response = await fetchWithTimeout(`${apiBaseUrl}/secrets`, { cache: "no-store" });
       if (!response.ok) {
         throw new Error(`GET /secrets ${response.status}`);
       }
@@ -662,8 +816,8 @@ export default function Home() {
     setBusyAction("models");
     try {
       const [providersResponse, configsResponse] = await Promise.all([
-        fetch(`${apiBaseUrl}/model-providers`, { cache: "no-store" }),
-        fetch(`${apiBaseUrl}/model-configs`, { cache: "no-store" }),
+        fetchWithTimeout(`${apiBaseUrl}/model-providers`, { cache: "no-store" }),
+        fetchWithTimeout(`${apiBaseUrl}/model-configs`, { cache: "no-store" }),
       ]);
       if (!providersResponse.ok) {
         throw new Error(`GET /model-providers ${providersResponse.status}`);
@@ -673,8 +827,42 @@ export default function Home() {
       }
       const providersData = await providersResponse.json();
       const configsData = await configsResponse.json();
-      setModelProviders(providersData.items as ModelProvider[]);
-      setModelConfigs(configsData.items as ModelConfig[]);
+      const providers = providersData.items as ModelProvider[];
+      const configs = configsData.items as ModelConfig[];
+      setModelProviders(providers);
+      setModelConfigs(configs);
+      const deepseekProvider = providers.find((provider) => provider.name === "deepseek");
+      setModelConfigForm((form) =>
+        form.provider_id || !deepseekProvider ? form : { ...form, provider_id: String(deepseekProvider.id) },
+      );
+      setModelProviderDrafts((currentDrafts) =>
+        providers.reduce<Record<number, ModelProviderDraft>>((drafts, provider) => {
+          drafts[provider.id] = currentDrafts[provider.id] ?? {
+            name: provider.name,
+            provider_type: provider.provider_type,
+            base_url: provider.base_url ?? "",
+            status: provider.status,
+            config: stringifyJson(provider.config_json ?? {}),
+            error: null,
+          };
+          return drafts;
+        }, {}),
+      );
+      setModelConfigDrafts((currentDrafts) =>
+        configs.reduce<Record<number, ModelConfigDraft>>((drafts, modelConfig) => {
+          drafts[modelConfig.id] = currentDrafts[modelConfig.id] ?? {
+            provider_id: String(modelConfig.provider_id),
+            model_name: modelConfig.model_name,
+            model_type: modelConfig.model_type,
+            display_name: modelConfig.display_name ?? "",
+            context_window: modelConfig.context_window ? String(modelConfig.context_window) : "",
+            default_config: stringifyJson(modelConfig.default_config ?? {}),
+            status: modelConfig.status,
+            error: null,
+          };
+          return drafts;
+        }, {}),
+      );
       setStatusLine("Models 已同步");
     } catch (error) {
       setStatusLine(error instanceof Error ? error.message : "Models 同步失败");
@@ -682,6 +870,70 @@ export default function Home() {
       setBusyAction(null);
     }
   }, []);
+
+  const loadOps = useCallback(async () => {
+    setBusyAction("ops");
+    try {
+      const [queuesResponse, workersResponse, deadResponse] = await Promise.all([
+        fetchWithTimeout(`${apiBaseUrl}/ops/queues`, { cache: "no-store" }),
+        fetchWithTimeout(`${apiBaseUrl}/ops/workers?active_seconds=600`, { cache: "no-store" }),
+        fetchWithTimeout(`${apiBaseUrl}/ops/queues/workflow_runs/dead`, { cache: "no-store" }),
+      ]);
+      if (!queuesResponse.ok) {
+        throw new Error(`GET /ops/queues ${queuesResponse.status}`);
+      }
+      if (!workersResponse.ok) {
+        throw new Error(`GET /ops/workers ${workersResponse.status}`);
+      }
+      if (!deadResponse.ok) {
+        throw new Error(`GET /ops/queues/workflow_runs/dead ${deadResponse.status}`);
+      }
+
+      const [queuesData, workersData, deadData] = await Promise.all([
+        queuesResponse.json(),
+        workersResponse.json(),
+        deadResponse.json(),
+      ]);
+      const deadJobs = extractItems<OpsDeadJob>(deadData, ["items", "jobs", "dead_jobs", "dead"]);
+      const queueItems = extractItems<OpsQueue>(queuesData, ["items", "queues"]);
+      setOpsQueues(queueItems.length > 0 ? queueItems : ([queuesData] as OpsQueue[]));
+      setOpsWorkers(extractItems<OpsWorker>(workersData, ["items", "workers"]));
+      setOpsDeadJobs(deadJobs);
+      setOpsDeadCount(
+        extractNumber(deadData, ["count", "dead_count", "total"])
+          ?? extractNumber(queuesData, ["dead_letter_depth"])
+          ?? deadJobs.length,
+      );
+      setStatusLine("Ops 已同步");
+    } catch (error) {
+      setStatusLine(error instanceof Error ? error.message : "Ops 同步失败");
+    } finally {
+      setBusyAction(null);
+    }
+  }, []);
+
+  const recoverWorkflowRunsQueue = async () => {
+    setBusyAction("ops-recover");
+    try {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/ops/queues/workflow_runs/recover`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(`POST /ops/queues/workflow_runs/recover ${response.status}`);
+      }
+      const rawResult = await response.text();
+      const data = rawResult ? (JSON.parse(rawResult) as unknown) : {};
+      setOpsRecoverResult(JSON.stringify(data ?? {}, null, 2));
+      setStatusLine("workflow_runs 恢复完成");
+      await loadOps();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "恢复队列失败";
+      setOpsRecoverResult(message);
+      setStatusLine(message);
+    } finally {
+      setBusyAction(null);
+    }
+  };
 
   useEffect(() => {
     if (activeSection === "knowledge") {
@@ -696,7 +948,28 @@ export default function Home() {
     if (activeSection === "models") {
       void loadModels();
     }
-  }, [activeSection, loadKnowledge, loadModels, loadSecrets, loadTools]);
+    if (activeSection === "ops") {
+      void loadOps();
+    }
+  }, [activeSection, loadKnowledge, loadModels, loadOps, loadSecrets, loadTools]);
+
+  useEffect(() => {
+    if (activeSection !== "knowledge" || !selectedKnowledgeBaseId || !hasProcessingKnowledgeDocuments) {
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void loadKnowledgeDocuments(selectedKnowledgeBaseId, { silent: true });
+      void loadKnowledge(selectedKnowledgeBaseId, { silent: true });
+    }, 3000);
+    return () => window.clearInterval(intervalId);
+  }, [
+    activeSection,
+    hasProcessingKnowledgeDocuments,
+    loadKnowledge,
+    loadKnowledgeDocuments,
+    selectedKnowledgeBaseId,
+  ]);
 
   useEffect(() => {
     if (activeSection !== "workflow" || !selectedNode) {
@@ -736,7 +1009,7 @@ export default function Home() {
   const createWorkflow = async () => {
     setBusyAction("create");
     try {
-      const response = await fetch(`${apiBaseUrl}/workflows`, {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/workflows`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -759,9 +1032,22 @@ export default function Home() {
 
   const createKnowledgeBase = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const chunkSize = Number(knowledgeForm.chunk_size_tokens);
+    const chunkOverlap = Number(knowledgeForm.chunk_overlap_tokens);
+    if (
+      !Number.isInteger(chunkSize) ||
+      !Number.isInteger(chunkOverlap) ||
+      chunkSize <= 0 ||
+      chunkOverlap < 0 ||
+      chunkOverlap >= chunkSize
+    ) {
+      setStatusLine("chunk_size_tokens 必须大于 0，chunk_overlap_tokens 必须小于 chunk_size_tokens");
+      return;
+    }
+
     setBusyAction("create-knowledge");
     try {
-      const response = await fetch(`${apiBaseUrl}/knowledge-bases`, {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/knowledge-bases`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -769,15 +1055,19 @@ export default function Home() {
           description: knowledgeForm.description || null,
           embedding_model: knowledgeForm.embedding_model,
           embedding_dim: 1536,
-          tokenizer: "cl100k_base",
-          config: {},
+          tokenizer: knowledgeForm.tokenizer,
+          config: {
+            embedding_provider: knowledgeForm.embedding_provider,
+            chunk_size_tokens: chunkSize,
+            chunk_overlap_tokens: chunkOverlap,
+          },
         }),
       });
       if (!response.ok) {
         throw new Error(`POST /knowledge-bases ${response.status}`);
       }
       const knowledgeBase = (await response.json()) as KnowledgeBase;
-      setKnowledgeForm({ name: "", description: "", embedding_model: "local-embedding" });
+      setKnowledgeForm(defaultKnowledgeForm);
       setSelectedKnowledgeBaseId(knowledgeBase.id);
       setStatusLine(`已创建知识库 #${knowledgeBase.id}`);
       await loadKnowledge(knowledgeBase.id);
@@ -800,7 +1090,7 @@ export default function Home() {
     setToolConfigError(null);
     setBusyAction("create-tool");
     try {
-      const response = await fetch(`${apiBaseUrl}/tools`, {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/tools`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -839,7 +1129,7 @@ export default function Home() {
 
     setBusyAction(`test-tool-${toolId}`);
     try {
-      const response = await fetch(`${apiBaseUrl}/tools/${toolId}/test`, {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/tools/${toolId}/test`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ input: parsedInput.value }),
@@ -863,7 +1153,7 @@ export default function Home() {
     event.preventDefault();
     setBusyAction("create-secret");
     try {
-      const response = await fetch(`${apiBaseUrl}/secrets`, {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/secrets`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -898,7 +1188,7 @@ export default function Home() {
     formData.append("file", file);
     setBusyAction("upload-document");
     try {
-      const response = await fetch(`${apiBaseUrl}/knowledge-bases/${kbId}/documents`, {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/knowledge-bases/${kbId}/documents`, {
         method: "POST",
         body: formData,
       });
@@ -922,7 +1212,7 @@ export default function Home() {
 
     setBusyAction(`retry-document-${documentId}`);
     try {
-      const response = await fetch(`${apiBaseUrl}/documents/${documentId}/retry`, { method: "POST" });
+      const response = await fetchWithTimeout(`${apiBaseUrl}/documents/${documentId}/retry`, { method: "POST" });
       const result = await response.json();
       if (!response.ok) {
         throw new Error(result.detail ?? `POST /documents/${documentId}/retry ${response.status}`);
@@ -943,7 +1233,7 @@ export default function Home() {
 
     setBusyAction(`delete-document-${documentId}`);
     try {
-      const response = await fetch(`${apiBaseUrl}/documents/${documentId}`, { method: "DELETE" });
+      const response = await fetchWithTimeout(`${apiBaseUrl}/documents/${documentId}`, { method: "DELETE" });
       const result = await response.json();
       if (!response.ok) {
         throw new Error(result.detail ?? `DELETE /documents/${documentId} ${response.status}`);
@@ -966,21 +1256,28 @@ export default function Home() {
 
     const topK = Number(retrieveForm.top_k);
     const scoreThreshold = Number(retrieveForm.score_threshold);
-    if (!retrieveForm.query.trim() || !Number.isFinite(topK) || !Number.isFinite(scoreThreshold)) {
-      setRetrieveError("请填写 query，并确认 top_k / score_threshold 是数字");
+    const contextBudgetTokens = Number(retrieveForm.context_budget_tokens);
+    if (
+      !retrieveForm.query.trim() ||
+      !Number.isFinite(topK) ||
+      !Number.isFinite(scoreThreshold) ||
+      !Number.isFinite(contextBudgetTokens)
+    ) {
+      setRetrieveError("请填写 query，并确认 top_k / score_threshold / context_budget_tokens 是数字");
       return;
     }
 
     setRetrieveError(null);
     setBusyAction("retrieve-knowledge");
     try {
-      const response = await fetch(`${apiBaseUrl}/knowledge-bases/${kbId}/retrieve`, {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/knowledge-bases/${kbId}/retrieve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           query: retrieveForm.query,
           top_k: topK,
           score_threshold: scoreThreshold,
+          context_budget_tokens: contextBudgetTokens,
         }),
       });
       const result = await response.json();
@@ -1013,7 +1310,7 @@ export default function Home() {
 
     setBusyAction(`update-tool-${toolId}`);
     try {
-      const response = await fetch(`${apiBaseUrl}/tools/${toolId}`, {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/tools/${toolId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1052,7 +1349,7 @@ export default function Home() {
 
     setBusyAction(`update-secret-${secretId}`);
     try {
-      const response = await fetch(`${apiBaseUrl}/secrets/${secretId}`, {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/secrets/${secretId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1071,13 +1368,206 @@ export default function Home() {
     }
   };
 
+  const createModelProvider = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const parsedConfig = parseJsonObject(modelProviderForm.config);
+    if (parsedConfig.error) {
+      setModelProviderConfigError(parsedConfig.error);
+      setStatusLine("Provider config 不是合法 JSON 对象");
+      return;
+    }
+
+    setModelProviderConfigError(null);
+    setBusyAction("create-model-provider");
+    try {
+      const response = await fetch(`${apiBaseUrl}/model-providers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: modelProviderForm.name,
+          provider_type: modelProviderForm.provider_type,
+          base_url: modelProviderForm.base_url || null,
+          status: modelProviderForm.status,
+          config: parsedConfig.value,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.detail ?? `POST /model-providers ${response.status}`);
+      }
+      setModelProviderForm({
+        name: "deepseek",
+        provider_type: "deepseek",
+        base_url: "https://api.deepseek.com",
+        status: "active",
+        config: stringifyJson({ api_key_secret: "deepseek_api_key" }),
+      });
+      setStatusLine(`已创建 Model Provider #${result.id}`);
+      await loadModels();
+    } catch (error) {
+      setStatusLine(error instanceof Error ? error.message : "创建 Model Provider 失败");
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const updateModelProvider = async (providerId: number) => {
+    const draft = modelProviderDrafts[providerId];
+    if (!draft) {
+      return;
+    }
+    const parsedConfig = parseJsonObject(draft.config);
+    if (parsedConfig.error) {
+      setModelProviderDrafts((drafts) => ({
+        ...drafts,
+        [providerId]: { ...draft, error: parsedConfig.error },
+      }));
+      setStatusLine("Provider config 不是合法 JSON 对象");
+      return;
+    }
+
+    setBusyAction(`update-model-provider-${providerId}`);
+    try {
+      const response = await fetch(`${apiBaseUrl}/model-providers/${providerId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: draft.name,
+          provider_type: draft.provider_type,
+          base_url: draft.base_url || null,
+          status: draft.status,
+          config: parsedConfig.value,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.detail ?? `PUT /model-providers/${providerId} ${response.status}`);
+      }
+      setStatusLine(`已更新 Model Provider #${providerId}`);
+      await loadModels();
+    } catch (error) {
+      setStatusLine(error instanceof Error ? error.message : "更新 Model Provider 失败");
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const createModelConfig = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const parsedDefaultConfig = parseJsonObject(modelConfigForm.default_config);
+    const providerId = Number(modelConfigForm.provider_id);
+    const contextWindow = modelConfigForm.context_window ? Number(modelConfigForm.context_window) : null;
+    if (parsedDefaultConfig.error || !Number.isInteger(providerId) || providerId <= 0) {
+      setModelConfigError(parsedDefaultConfig.error ?? "请选择 Provider");
+      setStatusLine("Model Config 表单不完整");
+      return;
+    }
+    if (contextWindow !== null && (!Number.isInteger(contextWindow) || contextWindow <= 0)) {
+      setModelConfigError("context_window 必须是正整数");
+      return;
+    }
+
+    setModelConfigError(null);
+    setBusyAction("create-model-config");
+    try {
+      const response = await fetch(`${apiBaseUrl}/model-configs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider_id: providerId,
+          model_name: modelConfigForm.model_name,
+          model_type: modelConfigForm.model_type,
+          display_name: modelConfigForm.display_name || null,
+          context_window: contextWindow,
+          default_config: parsedDefaultConfig.value,
+          status: modelConfigForm.status,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.detail ?? `POST /model-configs ${response.status}`);
+      }
+      setModelConfigForm((form) => ({
+        ...form,
+        model_name: "deepseek-v4-flash",
+        display_name: "DeepSeek V4-Flash",
+        context_window: "1000000",
+        default_config: stringifyJson({
+          temperature: 0.3,
+          max_tokens: 1000,
+          model_version: "DeepSeek-V4-Flash",
+          api_model_alias: "deepseek-v4-flash",
+          thinking_mode: false,
+        }),
+      }));
+      setStatusLine(`已创建 Model Config #${result.id}`);
+      await loadModels();
+    } catch (error) {
+      setStatusLine(error instanceof Error ? error.message : "创建 Model Config 失败");
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const updateModelConfig = async (modelConfigId: number) => {
+    const draft = modelConfigDrafts[modelConfigId];
+    if (!draft) {
+      return;
+    }
+    const parsedDefaultConfig = parseJsonObject(draft.default_config);
+    const providerId = Number(draft.provider_id);
+    const contextWindow = draft.context_window ? Number(draft.context_window) : null;
+    if (parsedDefaultConfig.error || !Number.isInteger(providerId) || providerId <= 0) {
+      setModelConfigDrafts((drafts) => ({
+        ...drafts,
+        [modelConfigId]: { ...draft, error: parsedDefaultConfig.error ?? "请选择 Provider" },
+      }));
+      setStatusLine("Model Config 表单不完整");
+      return;
+    }
+    if (contextWindow !== null && (!Number.isInteger(contextWindow) || contextWindow <= 0)) {
+      setModelConfigDrafts((drafts) => ({
+        ...drafts,
+        [modelConfigId]: { ...draft, error: "context_window 必须是正整数" },
+      }));
+      return;
+    }
+
+    setBusyAction(`update-model-config-${modelConfigId}`);
+    try {
+      const response = await fetch(`${apiBaseUrl}/model-configs/${modelConfigId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider_id: providerId,
+          model_name: draft.model_name,
+          model_type: draft.model_type,
+          display_name: draft.display_name || null,
+          context_window: contextWindow,
+          default_config: parsedDefaultConfig.value,
+          status: draft.status,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.detail ?? `PUT /model-configs/${modelConfigId} ${response.status}`);
+      }
+      setStatusLine(`已更新 Model Config #${modelConfigId}`);
+      await loadModels();
+    } catch (error) {
+      setStatusLine(error instanceof Error ? error.message : "更新 Model Config 失败");
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const saveDraft = async () => {
     if (!selectedWorkflow) {
       return false;
     }
     setBusyAction("save");
     try {
-      const response = await fetch(`${apiBaseUrl}/workflows/${selectedWorkflow.id}`, {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/workflows/${selectedWorkflow.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1122,12 +1612,13 @@ export default function Home() {
   const loadRunTrace = async (runId: number) => {
     setBusyAction("trace");
     try {
-      const traceResponse = await fetch(`${apiBaseUrl}/runs/${runId}/trace`, { cache: "no-store" });
+      const traceResponse = await fetchWithTimeout(`${apiBaseUrl}/runs/${runId}/trace`, { cache: "no-store" });
       if (!traceResponse.ok) {
         throw new Error(`GET /runs/${runId}/trace ${traceResponse.status}`);
       }
       const nextTrace = (await traceResponse.json()) as RunTrace;
       setTrace(nextTrace);
+      setInspectorTab("trace");
       setStatusLine(`已载入运行 #${runId} · ${nextTrace.run.status}`);
       const firstFailedNode = nextTrace.nodes.find((node) => node.status === "failed");
       if (firstFailedNode) {
@@ -1146,7 +1637,7 @@ export default function Home() {
     }
     setBusyAction("validate");
     try {
-      const response = await fetch(`${apiBaseUrl}/workflows/${selectedWorkflow.id}/validate`, {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/workflows/${selectedWorkflow.id}/validate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode: "publish", graph_json: graph }),
@@ -1165,6 +1656,161 @@ export default function Home() {
     }
   };
 
+  const refreshCurrentVersionDetail = async () => {
+    if (!selectedWorkflow?.current_version_id) {
+      setCurrentVersionDetail(null);
+      return null;
+    }
+
+    const response = await fetchWithTimeout(`${apiBaseUrl}/workflow-versions/${selectedWorkflow.current_version_id}`, {
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      throw new Error(`GET /workflow-versions/${selectedWorkflow.current_version_id} ${response.status}`);
+    }
+    const version = (await response.json()) as WorkflowVersion;
+    setCurrentVersionDetail(version);
+    void loadWorkflowVersions(selectedWorkflow.id).catch(() => undefined);
+    if (currentVersionCode && currentVersionCode.id !== version.id) {
+      setCurrentVersionCode(null);
+      setSelectedCodeVersion(null);
+      setShowCurrentVersionCode(false);
+    }
+    return version;
+  };
+
+  const loadCurrentVersionCode = async (targetVersion?: WorkflowVersion) => {
+    const versionId = targetVersion?.id ?? selectedWorkflow?.current_version_id;
+    if (!versionId) {
+      return;
+    }
+    setBusyAction("version-code");
+    try {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/workflow-versions/${versionId}/code`, {
+        cache: "no-store",
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.detail?.message ?? `GET /workflow-versions/code ${response.status}`);
+      }
+      const code = result as WorkflowVersionCode;
+      setCurrentVersionCode(code);
+      setSelectedCodeVersion({ ...(targetVersion ?? code), ...code });
+      setShowCurrentVersionCode(true);
+      setCurrentVersionDetail((current) => (current?.id === code.id ? { ...current, ...code } : current));
+      setWorkflowVersions((items) => items.map((item) => (item.id === code.id ? { ...item, ...code } : item)));
+      setStatusLine(
+        code.code_modified
+          ? `v${code.version} workflow.py hash 已变更，运行将以本地代码为准`
+          : `已载入 v${code.version} 版本代码`,
+      );
+    } catch (error) {
+      setStatusLine(error instanceof Error ? error.message : "版本代码载入失败");
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const regenerateVersionCode = async (targetVersion: WorkflowVersion) => {
+    const status = targetVersion.code_status ?? (targetVersion.code_path ? "ok" : "missing_metadata");
+    const force = status === "ok" || status === "modified";
+    if (
+      force &&
+      !window.confirm(
+        status === "modified"
+          ? `v${targetVersion.version} 的本地 workflow.py hash 已变更，重生成会覆盖本地代码。是否继续？`
+          : `v${targetVersion.version} 当前 hash 一致，是否仍然强制重生成？`,
+      )
+    ) {
+      setStatusLine("已取消代码重生成");
+      return;
+    }
+
+    setBusyAction("version-code-regenerate");
+    try {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/workflow-versions/${targetVersion.id}/regenerate-code`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force }),
+        cache: "no-store",
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.detail?.message ?? `POST /workflow-versions/regenerate-code ${response.status}`);
+      }
+      const regenerated = result as WorkflowVersion;
+      setWorkflowVersions((items) =>
+        items.map((item) => (item.id === regenerated.id ? { ...item, ...regenerated } : item)),
+      );
+      setCurrentVersionDetail((current) => (current?.id === regenerated.id ? { ...current, ...regenerated } : current));
+      if (selectedCodeVersion?.id === regenerated.id) {
+        setCurrentVersionCode(null);
+        setSelectedCodeVersion(regenerated);
+        setShowCurrentVersionCode(false);
+      }
+      if (selectedWorkflow) {
+        await loadWorkflowVersions(selectedWorkflow.id);
+      }
+      setStatusLine(`已重生成 v${regenerated.version} workflow.py`);
+    } catch (error) {
+      setStatusLine(error instanceof Error ? error.message : "代码重生成失败");
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const cleanupGeneratedWorkflowDirs = async () => {
+    setBusyAction("generated-cleanup");
+    try {
+      const previewResponse = await fetchWithTimeout(`${apiBaseUrl}/generated-workflows/cleanup?dry_run=true`, {
+        method: "POST",
+        cache: "no-store",
+      });
+      const previewResult = await previewResponse.json();
+      if (!previewResponse.ok) {
+        throw new Error(previewResult.detail ?? `POST /generated-workflows/cleanup ${previewResponse.status}`);
+      }
+      const preview = previewResult as GeneratedWorkflowCleanupReport;
+      setGeneratedCleanupReport(preview);
+      if (preview.removed_total === 0) {
+        setStatusLine(`生成目录清理预览：无需移除，保留 ${preview.kept_total} 个已发布版本`);
+        return;
+      }
+      if (
+        !window.confirm(
+          `生成目录清理预览将移除 ${preview.removed_total} 项：temp ${preview.removed_temp_dirs.length}，orphan ${preview.removed_orphan_version_dirs.length}。是否执行？`,
+        )
+      ) {
+        setStatusLine("已完成生成目录清理预览，未执行删除");
+        return;
+      }
+
+      const response = await fetchWithTimeout(`${apiBaseUrl}/generated-workflows/cleanup?dry_run=false`, {
+        method: "POST",
+        cache: "no-store",
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.detail ?? `POST /generated-workflows/cleanup ${response.status}`);
+      }
+      const report = result as GeneratedWorkflowCleanupReport;
+      setGeneratedCleanupReport(report);
+      setStatusLine(
+        `生成目录清理完成：移除 ${report.removed_total} 项，保留 ${report.kept_total} 个已发布版本`,
+      );
+      if (selectedWorkflow?.current_version_id) {
+        await refreshCurrentVersionDetail();
+      }
+      if (selectedWorkflow) {
+        await loadWorkflowVersions(selectedWorkflow.id);
+      }
+    } catch (error) {
+      setStatusLine(error instanceof Error ? error.message : "生成目录清理失败");
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const publishWorkflow = async () => {
     if (!selectedWorkflow) {
       return false;
@@ -1175,7 +1821,7 @@ export default function Home() {
       if (!saved) {
         throw new Error("保存草稿失败，发布已取消");
       }
-      const response = await fetch(`${apiBaseUrl}/workflows/${selectedWorkflow.id}/publish`, {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/workflows/${selectedWorkflow.id}/publish`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ release_note: "MVP vertical slice" }),
@@ -1200,7 +1846,7 @@ export default function Home() {
   const pollRunUntilTerminal = async (runId: number) => {
     const terminalStatuses = new Set(["completed", "failed", "cancelled"]);
     for (let attempt = 0; attempt < 60; attempt += 1) {
-      const response = await fetch(`${apiBaseUrl}/runs/${runId}`, { cache: "no-store" });
+      const response = await fetchWithTimeout(`${apiBaseUrl}/runs/${runId}`, { cache: "no-store" });
       const run = await response.json();
       if (!response.ok) {
         throw new Error(run.detail ?? `GET /runs/${runId} ${response.status}`);
@@ -1229,9 +1875,27 @@ export default function Home() {
     }
 
     setRunInputError(null);
+    let versionForRun = currentVersionDetail;
+    if (selectedWorkflow.current_version_id) {
+      try {
+        versionForRun = await refreshCurrentVersionDetail();
+      } catch (error) {
+        setStatusLine(error instanceof Error ? error.message : "发布代码状态检查失败");
+      }
+    }
+    if (versionForRun?.code_modified === true) {
+      const shouldRun = window.confirm(
+        "当前版本的本地 workflow.py hash 与发布记录不一致。继续运行会以本地代码为准，并在 trace 中记录 code_modified=true。",
+      );
+      if (!shouldRun) {
+        setStatusLine("已取消运行：本地代码 hash 已变更");
+        return false;
+      }
+    }
+
     setBusyAction("run");
     try {
-      const response = await fetch(`${apiBaseUrl}/workflows/${selectedWorkflow.id}/run`, {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/workflows/${selectedWorkflow.id}/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1248,7 +1912,7 @@ export default function Home() {
         setStatusLine(`异步运行已提交 #${result.run_id}，等待完成`);
         await pollRunUntilTerminal(result.run_id);
       }
-      const traceResponse = await fetch(`${apiBaseUrl}/runs/${result.run_id}/trace`, {
+      const traceResponse = await fetchWithTimeout(`${apiBaseUrl}/runs/${result.run_id}/trace`, {
         cache: "no-store",
       });
       if (!traceResponse.ok) {
@@ -1256,12 +1920,13 @@ export default function Home() {
       }
       const nextTrace = (await traceResponse.json()) as RunTrace;
       setTrace(nextTrace);
+      setInspectorTab("trace");
       setStatusLine(`${runMode === "async" ? "异步" : "同步"}运行完成 #${result.run_id} · ${nextTrace.run.status}`);
       const firstFailedNode = nextTrace.nodes.find((node) => node.status === "failed");
       if (firstFailedNode) {
         focusNode(firstFailedNode.node_id);
       }
-      const listResponse = await fetch(`${apiBaseUrl}/workflows`, { cache: "no-store" });
+      const listResponse = await fetchWithTimeout(`${apiBaseUrl}/workflows`, { cache: "no-store" });
       if (listResponse.ok) {
         const data = await listResponse.json();
         setWorkflows(data.items as Workflow[]);
@@ -1288,14 +1953,14 @@ export default function Home() {
   };
 
   const addNode = useCallback(
-    (type: NodeType) => {
+    (type: NodeType, position?: { x: number; y: number }) => {
       const template = nodeCatalog.find((item) => item.type === type);
       if (!template) {
         return;
       }
 
       const sameTypeCount = graph.nodes.filter((node) => node.type === type).length;
-      const nextNode = createGraphNode(template, sameTypeCount + 1, graph.nodes.length);
+      const nextNode = createGraphNode(template, sameTypeCount + 1, graph.nodes.length, position);
       setGraph((currentGraph) => ({
         ...currentGraph,
         nodes: [...currentGraph.nodes, nextNode],
@@ -1305,6 +1970,100 @@ export default function Home() {
       setStatusLine(`已添加节点：${template.label}`);
     },
     [graph.nodes],
+  );
+
+  const addNodeAtClientPoint = useCallback(
+    (type: NodeType, clientX: number, clientY: number) => {
+      const position = flowInstance?.screenToFlowPosition({ x: clientX, y: clientY });
+      addNode(
+        type,
+        position
+          ? {
+              x: Math.round(position.x - 75),
+              y: Math.round(position.y - 30),
+            }
+          : undefined,
+      );
+    },
+    [addNode, flowInstance],
+  );
+
+  const onNodeMouseDown = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>, type: NodeType) => {
+      if (event.button !== 0 || !selectedWorkflow || busyAction !== null) {
+        return;
+      }
+
+      event.preventDefault();
+      mouseDragRef.current = { type, startX: event.clientX, startY: event.clientY };
+
+      const onMouseMove = (mouseEvent: MouseEvent) => {
+        const drag = mouseDragRef.current;
+        if (!drag) {
+          return;
+        }
+
+        const moved = Math.hypot(mouseEvent.clientX - drag.startX, mouseEvent.clientY - drag.startY);
+        if (moved < nodeDropMoveThreshold) {
+          return;
+        }
+
+        setNodeDragPreview({
+          type: drag.type,
+          x: mouseEvent.clientX,
+          y: mouseEvent.clientY,
+          overCanvas: isClientPointInsideElement(canvasRef.current, mouseEvent.clientX, mouseEvent.clientY),
+        });
+      };
+
+      const onMouseUp = (mouseEvent: MouseEvent) => {
+        const drag = mouseDragRef.current;
+        mouseDragRef.current = null;
+        setNodeDragPreview(null);
+        window.removeEventListener("mousemove", onMouseMove);
+        window.removeEventListener("mouseup", onMouseUp);
+
+        if (!drag) {
+          return;
+        }
+
+        const moved = Math.hypot(mouseEvent.clientX - drag.startX, mouseEvent.clientY - drag.startY);
+        if (moved < nodeDropMoveThreshold) {
+          return;
+        }
+
+        ignoreNextNodeClickRef.current = true;
+        const canvasRect = canvasRef.current?.getBoundingClientRect();
+        const droppedOnCanvas =
+          canvasRect &&
+          mouseEvent.clientX >= canvasRect.left &&
+          mouseEvent.clientX <= canvasRect.right &&
+          mouseEvent.clientY >= canvasRect.top &&
+          mouseEvent.clientY <= canvasRect.bottom;
+
+        if (!droppedOnCanvas) {
+          setStatusLine("请把节点拖到画布区域内释放");
+          return;
+        }
+
+        addNodeAtClientPoint(drag.type, mouseEvent.clientX, mouseEvent.clientY);
+      };
+
+      window.addEventListener("mouseup", onMouseUp);
+      window.addEventListener("mousemove", onMouseMove);
+    },
+    [addNodeAtClientPoint, busyAction, selectedWorkflow],
+  );
+
+  const onNodeButtonClick = useCallback(
+    (type: NodeType) => {
+      if (ignoreNextNodeClickRef.current) {
+        ignoreNextNodeClickRef.current = false;
+        return;
+      }
+      addNode(type);
+    },
+    [addNode],
   );
 
   const applyKnowledgeDemoTemplate = useCallback(async () => {
@@ -1324,7 +2083,7 @@ export default function Home() {
     if (!knowledgeBaseId) {
       setBusyAction("knowledge-template");
       try {
-        const response = await fetch(`${apiBaseUrl}/knowledge-bases`, { cache: "no-store" });
+        const response = await fetchWithTimeout(`${apiBaseUrl}/knowledge-bases`, { cache: "no-store" });
         if (!response.ok) {
           throw new Error(`GET /knowledge-bases ${response.status}`);
         }
@@ -1434,75 +2193,35 @@ export default function Home() {
       setSelectedNodeId(selectedChange.id);
     }
 
-    setFlowNodes((nodes) => {
-      const nextNodes = applyNodeChanges(changes, nodes);
+    setFlowNodes((currentNodes) => {
+      const nextNodes = applyNodeChanges(changes, currentNodes);
       const removedIds = new Set(
         changes
           .filter((change) => nodeChangeHasId(change) && change.type === "remove")
           .map((change) => change.id),
       );
-      const flowNodeById = new Map(nextNodes.map((node) => [node.id, node]));
+      const hasPositionChange = changes.some((change) => nodeChangeHasId(change) && change.type === "position");
 
-      setGraph((currentGraph) => ({
-        ...currentGraph,
-        nodes: currentGraph.nodes
-          .filter((node) => !removedIds.has(node.id))
-          .map((node) => {
-            const flowNode = flowNodeById.get(node.id);
-            return flowNode ? { ...node, position: flowNode.position } : node;
-          }),
-        edges: currentGraph.edges.filter(
-          (edge) => !removedIds.has(edge.source) && !removedIds.has(edge.target),
-        ),
-      }));
+      if (removedIds.size > 0 || hasPositionChange) {
+        const flowNodeById = new Map(nextNodes.map((node) => [node.id, node]));
+        setGraph((currentGraph) => ({
+          ...currentGraph,
+          nodes: currentGraph.nodes
+            .filter((node) => !removedIds.has(node.id))
+            .map((node) => {
+              const flowNode = flowNodeById.get(node.id);
+              return flowNode ? { ...node, position: flowNode.position } : node;
+            }),
+          edges: currentGraph.edges.filter((edge) => !removedIds.has(edge.source) && !removedIds.has(edge.target)),
+        }));
+      }
 
       if (removedIds.size > 0) {
+        setSelectedEdgeId(null);
         setTrace(null);
       }
       return nextNodes;
     });
-  }, []);
-
-  const onEdgesChange = useCallback((changes: EdgeChange[]) => {
-    setFlowEdges((edges) => {
-      const nextEdges = applyEdgeChanges(changes, edges);
-      setGraph((currentGraph) => ({
-        ...currentGraph,
-        edges: flowEdgesToGraphEdges(nextEdges),
-      }));
-      setTrace(null);
-      return nextEdges;
-    });
-  }, []);
-
-  const onConnect = useCallback((connection: Connection) => {
-    if (!connection.source || !connection.target) {
-      return;
-    }
-    if (connection.source === connection.target) {
-      setStatusLine("不能连接到自身节点");
-      return;
-    }
-
-    setGraph((currentGraph) => {
-      const exists = currentGraph.edges.some(
-        (edge) => edge.source === connection.source && edge.target === connection.target,
-      );
-      if (exists) {
-        setStatusLine("该连线已存在");
-        return currentGraph;
-      }
-
-      const sourceNode = currentGraph.nodes.find((node) => node.id === connection.source);
-      const nextEdge: GraphEdge = {
-        id: makeEdgeId(connection.source, connection.target, currentGraph.edges.length),
-        source: connection.source,
-        target: connection.target,
-        label: sourceNode?.type === "branch" ? "branch" : undefined,
-      };
-      return { ...currentGraph, edges: [...currentGraph.edges, nextEdge] };
-    });
-    setTrace(null);
   }, []);
 
   return (
@@ -1514,7 +2233,7 @@ export default function Home() {
         </section>
 
         <nav className="main-nav" aria-label="管理入口">
-          {adminSections.map(({ id, label, Icon }) => (
+          {navigationSections.map(({ id, label, Icon }) => (
             <button
               className={activeSection === id ? "nav-tab active" : "nav-tab"}
               key={id}
@@ -1581,8 +2300,10 @@ export default function Home() {
                   <button
                     className="node-add-button"
                     key={type}
-                    onClick={() => addNode(type)}
+                    onClick={() => onNodeButtonClick(type)}
+                    onMouseDown={(event) => onNodeMouseDown(event, type)}
                     disabled={!selectedWorkflow || busyAction !== null}
+                    title="拖到画布，或点击添加"
                   >
                     <Icon size={15} />
                     <span>{label}</span>
@@ -1610,7 +2331,7 @@ export default function Home() {
           </nav>
         ) : (
           <section className="admin-sidebar-note">
-            <strong>{adminSections.find((section) => section.id === activeSection)?.label}</strong>
+            <strong>{navigationSections.find((section) => section.id === activeSection)?.label}</strong>
             <span>管理数据来自本地 API，表单提交后自动刷新。</span>
           </section>
         )}
@@ -1698,168 +2419,204 @@ export default function Home() {
           </div>
         </section>
 
-        <VersionCodePanel workflow={selectedWorkflow} version={currentVersionDetail} />
+        <VersionCodePanel
+          busy={busyAction !== null}
+          cleanupReport={generatedCleanupReport}
+          code={currentVersionCode}
+          codeVisible={showCurrentVersionCode}
+          onCleanupGenerated={cleanupGeneratedWorkflowDirs}
+          onLoadCode={loadCurrentVersionCode}
+          onRegenerateCode={regenerateVersionCode}
+          onToggleCode={() => setShowCurrentVersionCode((visible) => !visible)}
+          selectedCodeVersion={selectedCodeVersion}
+          version={currentVersionDetail}
+          versions={workflowVersions}
+          workflow={selectedWorkflow}
+        />
 
         <section className="designer">
-          <div className="canvas-flow">
+          <div className={nodeDragPreview?.overCanvas ? "canvas-flow dropping" : "canvas-flow"} ref={canvasRef}>
             <ReactFlow
               nodes={flowNodes}
-              edges={flowEdges}
+              edges={emptyFlowEdges}
+              nodeTypes={workflowNodeTypes}
               onInit={setFlowInstance}
               onNodesChange={onNodesChange}
-              onEdgesChange={onEdgesChange}
-              onConnect={onConnect}
-              onNodeClick={(_, node) => setSelectedNodeId(node.id)}
-              onPaneClick={() => setSelectedNodeId(null)}
+              onNodeClick={(_, node) => selectGraphNode(node.id)}
+              onPaneClick={clearCanvasSelection}
               deleteKeyCode={["Backspace", "Delete"]}
               fitView
             >
+              <WorkflowEdgeOverlay
+                deleteEdge={deleteGraphEdge}
+                graph={graph}
+                nodeEdgeAnchors={nodeEdgeAnchors}
+                pendingConnection={pendingConnection}
+                selectedEdgeId={selectedEdgeId}
+                selectEdge={(edgeId) => {
+                  setSelectedEdgeId(edgeId);
+                  setSelectedNodeId(null);
+                  setInspectorTab("config");
+                }}
+              />
               <Background />
               <MiniMap pannable zoomable />
               <Controls />
             </ReactFlow>
           </div>
+          {nodeDragPreview ? <NodeDragPreviewLayer preview={nodeDragPreview} /> : null}
 
           <aside className="inspector">
-            <section className="node-config-box">
-              <div className="section-heading">
-                <SquareTerminal size={16} />
-                节点配置
-              </div>
-              {selectedNode ? (
-                <div className="node-form">
-                  <label>
-                    <span>name</span>
-                    <input
-                      value={selectedNode.name}
-                      onChange={(event) => updateSelectedNode({ name: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    <span>type</span>
-                    <select
-                      value={selectedNode.type}
-                      onChange={(event) => updateSelectedNode({ type: event.target.value as NodeType })}
-                    >
-                      {nodeCatalog.map((item) => (
-                        <option key={item.type} value={item.type}>
-                          {item.type}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={selectedNode.enabled ?? true}
-                      onChange={(event) => updateSelectedNode({ enabled: event.target.checked })}
-                    />
-                    <span>enabled</span>
-                  </label>
-                  <StructuredNodeConfig
-                    knowledgeBases={knowledgeBases}
-                    modelConfigs={modelConfigs}
-                    node={selectedNode}
-                    onConfigChange={updateSelectedNodeConfig}
-                    tools={tools}
-                  />
-                  {(["config", "input_mapping", "output_mapping"] as JsonNodeField[]).map((field) => (
-                    <label key={field}>
-                      <span>{nodeJsonFieldLabels[field]}</span>
-                      <textarea
-                        value={nodeJsonDrafts[field]}
-                        onChange={(event) => updateSelectedNodeJson(field, event.target.value)}
-                        spellCheck={false}
-                      />
-                      {nodeJsonErrors[field] ? <small className="error-text">{nodeJsonErrors[field]}</small> : null}
-                    </label>
-                  ))}
-                </div>
-              ) : (
-                <p className="empty">选择画布节点后编辑配置</p>
-              )}
-            </section>
-
-            <section className="run-box">
-              <div className="run-box-header">
-                <label htmlFor="run-input">测试输入 JSON</label>
-                <div className="segmented-control" aria-label="运行模式">
-                  {(["sync", "async"] as RunMode[]).map((mode) => (
-                    <button
-                      key={mode}
-                      className={runMode === mode ? "active" : ""}
-                      type="button"
-                      onClick={() => setRunMode(mode)}
-                    >
-                      {mode}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <textarea
-                id="run-input"
-                value={runInput}
-                onChange={(event) => {
-                  setRunInput(event.target.value);
-                  setRunInputError(null);
-                }}
-                spellCheck={false}
-              />
-              {runInputError ? <small className="error-text">{runInputError}</small> : null}
-              <button
-                className="icon-button primary"
-                onClick={runWorkflow}
-                disabled={!selectedWorkflow || selectedWorkflow.status !== "published" || busyAction !== null}
-              >
-                <Play size={16} />
-                运行
-              </button>
-            </section>
-
-            <section className="result-box">
-              <div className="section-heading">
-                <FileJson size={16} />
-                校验结果
-              </div>
-              {validation ? <ValidationView validation={validation} onSelectNode={focusNode} /> : <p className="empty">等待校验</p>}
-            </section>
-
-            <section className="result-box">
-              <div className="result-box-header">
-                <div className="section-heading">
-                  <Activity size={16} />
-                  最近运行
-                </div>
+            <div className="panel-tabs" aria-label="编辑器面板">
+              {(["config", "run", "trace"] as InspectorTab[]).map((tab) => (
                 <button
-                  className="text-button"
-                  onClick={() => {
-                    if (selectedWorkflow) {
-                      void loadRuns(selectedWorkflow.id).catch((error) => {
-                        setStatusLine(error instanceof Error ? error.message : "运行历史同步失败");
-                      });
-                    }
-                  }}
-                  disabled={!selectedWorkflow || busyAction !== null}
+                  className={inspectorTab === tab ? "active" : ""}
+                  key={tab}
+                  onClick={() => setInspectorTab(tab)}
                   type="button"
                 >
-                  刷新
+                  {tab === "config" ? "配置" : tab === "run" ? "运行" : "Trace"}
                 </button>
-              </div>
-              <RunHistoryView
-                runs={runs}
-                activeRunId={trace ? getRunId(trace.run) : null}
-                busy={busyAction !== null}
-                onLoadTrace={(runId) => void loadRunTrace(runId)}
-              />
-            </section>
+              ))}
+            </div>
 
-            <section className="result-box">
-              <div className="section-heading">
-                <Activity size={16} />
-                运行 Trace
-              </div>
-              {trace ? <TraceView trace={trace} onSelectNode={focusNode} /> : <p className="empty">等待运行</p>}
-            </section>
+            {inspectorTab === "config" ? (
+              <>
+                <section className="node-config-box">
+                  <div className="section-heading">
+                    <SquareTerminal size={16} />
+                    {selectedEdge ? "连线配置" : "节点配置"}
+                  </div>
+                  {selectedNode ? (
+                    <NodeConfigPanel
+                      graph={graph}
+                      knowledgeBases={knowledgeBases}
+                      modelConfigs={modelConfigs}
+                      node={selectedNode}
+                      nodeJsonDrafts={nodeJsonDrafts}
+                      nodeJsonErrors={nodeJsonErrors}
+                      onConfigChange={updateSelectedNodeConfig}
+                      onNodeJsonChange={updateSelectedNodeJson}
+                      onNodePatch={updateSelectedNode}
+                      tools={tools}
+                    />
+                  ) : selectedEdge ? (
+                    <div className="node-form edge-form">
+                      <div className="edge-endpoints">
+                        <span>{selectedEdgeEndpoints?.source?.name ?? selectedEdge.source}</span>
+                        <strong>→</strong>
+                        <span>{selectedEdgeEndpoints?.target?.name ?? selectedEdge.target}</span>
+                      </div>
+                      <label>
+                        <span>label</span>
+                        <input
+                          value={selectedEdge.label ?? ""}
+                          onChange={(event) => updateSelectedEdge({ label: event.target.value || undefined })}
+                          placeholder="branch / condition"
+                        />
+                      </label>
+                      <button className="icon-button danger" onClick={() => deleteGraphEdge(selectedEdge.id)} type="button">
+                        <Trash2 size={16} />
+                        删除连线
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="empty">选择画布节点后编辑配置</p>
+                  )}
+                </section>
+
+                <section className="result-box">
+                  <div className="section-heading">
+                    <FileJson size={16} />
+                    校验结果
+                  </div>
+                  {validation ? (
+                    <ValidationView validation={validation} onSelectNode={focusNode} />
+                  ) : (
+                    <p className="empty">等待校验</p>
+                  )}
+                </section>
+              </>
+            ) : null}
+
+            {inspectorTab === "run" ? (
+              <>
+                <section className="run-box">
+                  <div className="run-box-header">
+                    <label htmlFor="run-input">测试输入 JSON</label>
+                    <div className="segmented-control" aria-label="运行模式">
+                      {(["sync", "async"] as RunMode[]).map((mode) => (
+                        <button
+                          key={mode}
+                          className={runMode === mode ? "active" : ""}
+                          type="button"
+                          onClick={() => setRunMode(mode)}
+                        >
+                          {mode}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <textarea
+                    id="run-input"
+                    value={runInput}
+                    onChange={(event) => {
+                      setRunInput(event.target.value);
+                      setRunInputError(null);
+                    }}
+                    spellCheck={false}
+                  />
+                  {runInputError ? <small className="error-text">{runInputError}</small> : null}
+                  <button
+                    className="icon-button primary"
+                    onClick={runWorkflow}
+                    disabled={!selectedWorkflow || selectedWorkflow.status !== "published" || busyAction !== null}
+                  >
+                    <Play size={16} />
+                    运行
+                  </button>
+                </section>
+
+                <section className="result-box">
+                  <div className="result-box-header">
+                    <div className="section-heading">
+                      <Activity size={16} />
+                      最近运行
+                    </div>
+                    <button
+                      className="text-button"
+                      onClick={() => {
+                        if (selectedWorkflow) {
+                          void loadRuns(selectedWorkflow.id).catch((error) => {
+                            setStatusLine(error instanceof Error ? error.message : "运行历史同步失败");
+                          });
+                        }
+                      }}
+                      disabled={!selectedWorkflow || busyAction !== null}
+                      type="button"
+                    >
+                      刷新
+                    </button>
+                  </div>
+                  <RunHistoryView
+                    runs={runs}
+                    activeRunId={trace ? getRunId(trace.run) : null}
+                    busy={busyAction !== null}
+                    onLoadTrace={(runId) => void loadRunTrace(runId)}
+                  />
+                </section>
+              </>
+            ) : null}
+
+            {inspectorTab === "trace" ? (
+              <section className="result-box">
+                <div className="section-heading">
+                  <Activity size={16} />
+                  运行 Trace
+                </div>
+                {trace ? <TraceView trace={trace} onSelectNode={focusNode} /> : <p className="empty">等待运行</p>}
+              </section>
+            ) : null}
           </aside>
         </section>
           </>
@@ -1905,6 +2662,54 @@ export default function Home() {
                     }
                   />
                 </label>
+                <div className="inline-fields">
+                  <label>
+                    <span>provider</span>
+                    <select
+                      value={knowledgeForm.embedding_provider}
+                      onChange={(event) =>
+                        setKnowledgeForm((form) => ({ ...form, embedding_provider: event.target.value }))
+                      }
+                    >
+                      <option value="local">local</option>
+                      <option value="openai">openai</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>tokenizer</span>
+                    <input
+                      readOnly
+                      value={knowledgeForm.tokenizer}
+                      onChange={(event) => setKnowledgeForm((form) => ({ ...form, tokenizer: event.target.value }))}
+                    />
+                  </label>
+                </div>
+                <div className="inline-fields">
+                  <label>
+                    <span>chunk_size_tokens</span>
+                    <input
+                      min={1}
+                      required
+                      type="number"
+                      value={knowledgeForm.chunk_size_tokens}
+                      onChange={(event) =>
+                        setKnowledgeForm((form) => ({ ...form, chunk_size_tokens: event.target.value }))
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>chunk_overlap_tokens</span>
+                    <input
+                      min={0}
+                      required
+                      type="number"
+                      value={knowledgeForm.chunk_overlap_tokens}
+                      onChange={(event) =>
+                        setKnowledgeForm((form) => ({ ...form, chunk_overlap_tokens: event.target.value }))
+                      }
+                    />
+                  </label>
+                </div>
                 <button className="icon-button primary" disabled={busyAction !== null}>
                   <Plus size={16} />
                   创建
@@ -1925,6 +2730,9 @@ export default function Home() {
                     >
                       <span>{kb.name}</span>
                       <small>{kb.status}</small>
+                      <small>
+                        docs {kb.indexed_document_count ?? 0}/{kb.document_count ?? 0} · chunks {kb.chunk_count ?? 0}
+                      </small>
                       <em>{kb.embedding_model ?? "embedding"}</em>
                     </button>
                   ))}
@@ -1947,6 +2755,21 @@ export default function Home() {
                   />
                   <span>{selectedKnowledgeBaseId ? "选择文件并上传" : "先选择知识库"}</span>
                 </label>
+                {selectedKnowledgeBase ? (
+                  <div className="chunk-card">
+                    <div>
+                      <strong>{selectedKnowledgeBase.name}</strong>
+                      <small>
+                        provider {String(selectedKnowledgeBase.config_json?.embedding_provider ?? "-")} · tokenizer{" "}
+                        {selectedKnowledgeBase.tokenizer ?? "-"}
+                      </small>
+                      <small>
+                        chunk {String(selectedKnowledgeBase.config_json?.chunk_size_tokens ?? "-")} / overlap{" "}
+                        {String(selectedKnowledgeBase.config_json?.chunk_overlap_tokens ?? "-")}
+                      </small>
+                    </div>
+                  </div>
+                ) : null}
               </section>
 
               <form className="admin-form" onSubmit={retrieveKnowledge}>
@@ -1987,6 +2810,17 @@ export default function Home() {
                     />
                   </label>
                 </div>
+                <label>
+                  <span>context_budget_tokens</span>
+                  <input
+                    min={1}
+                    type="number"
+                    value={retrieveForm.context_budget_tokens}
+                    onChange={(event) =>
+                      setRetrieveForm((form) => ({ ...form, context_budget_tokens: event.target.value }))
+                    }
+                  />
+                </label>
                 {retrieveError ? <small className="error-text">{retrieveError}</small> : null}
                 <button className="icon-button primary" disabled={!selectedKnowledgeBaseId || busyAction !== null}>
                   <Search size={16} />
@@ -2015,6 +2849,9 @@ export default function Home() {
                           {chunk.source?.chunk_index ?? chunk.chunk_index ?? "-"} · score{" "}
                           {typeof chunk.score === "number" ? chunk.score.toFixed(3) : "-"}
                         </small>
+                        <small>
+                          mode {chunk.retrieval_mode ?? "-"} · tokens {chunk.token_count ?? "-"}
+                        </small>
                       </div>
                       <p>{chunk.content ?? chunk.text ?? JSON.stringify(chunk)}</p>
                     </article>
@@ -2028,6 +2865,9 @@ export default function Home() {
                 <FileJson size={16} />
                 Documents
               </div>
+              {hasProcessingKnowledgeDocuments ? (
+                <p className="empty">文档正在处理，列表会自动刷新。</p>
+              ) : null}
               {knowledgeDocuments.length > 0 ? (
                 <div className="data-table-wrap">
                   <table className="data-table">
@@ -2354,36 +3194,608 @@ export default function Home() {
           </section>
         ) : null}
 
+        {activeSection === "ops" ? (
+          <section className="admin-page">
+            <AdminHeader
+              eyebrow="Operations"
+              title="Ops"
+              description="查看队列、worker 和 workflow_runs dead-letter，并执行最小恢复操作。"
+              onRefresh={loadOps}
+              busy={busyAction !== null}
+            />
+
+            <section className="metric-strip">
+              <div>
+                <span>Queues</span>
+                <strong>{opsQueues.length}</strong>
+              </div>
+              <div>
+                <span>Workers</span>
+                <strong>{opsWorkers.length}</strong>
+              </div>
+              <div>
+                <span>workflow_runs dead</span>
+                <strong>{opsDeadCount}</strong>
+              </div>
+            </section>
+
+            <section className="admin-grid">
+              <section className="admin-panel">
+                <div className="section-heading">
+                  <Database size={16} />
+                  Queues
+                </div>
+                {opsQueues.length > 0 ? (
+                  <div className="data-table-wrap">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>Queue</th>
+                          <th>Ready</th>
+                          <th>Active</th>
+                          <th>Delayed</th>
+                          <th>Dead</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {opsQueues.map((queue, index) => (
+                          <tr key={`${readText(queue, ["name", "queue", "queue_name"], "queue")}-${index}`}>
+                            <td>{readText(queue, ["name", "queue", "queue_name"])}</td>
+                            <td>{readNumber(queue, ["main_depth", "ready", "queued", "pending"])}</td>
+                            <td>{readNumber(queue, ["processing_depth", "active", "running"])}</td>
+                            <td>{readNumber(queue, ["delayed"])}</td>
+                            <td>{readNumber(queue, ["dead_letter_depth", "dead", "failed"])}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="empty">暂无队列数据</p>
+                )}
+              </section>
+
+              <section className="admin-panel">
+                <div className="section-heading">
+                  <Activity size={16} />
+                  Workers
+                </div>
+                {opsWorkers.length > 0 ? (
+                  <div className="data-table-wrap">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>Worker</th>
+                          <th>Status</th>
+                          <th>Queue</th>
+                          <th>Current Job</th>
+                          <th>Heartbeat</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {opsWorkers.map((worker, index) => (
+                          <tr key={`${readText(worker, ["id", "worker_id", "name"], "worker")}-${index}`}>
+                            <td>{readText(worker, ["name", "worker_id", "id"])}</td>
+                            <td>{readText(worker, ["status"])}</td>
+                            <td>{readText(worker, ["queue_name", "queue"])}</td>
+                            <td>{readText(worker, ["current_job_id"])}</td>
+                            <td>
+                              {formatDate(
+                                (worker.last_seen_at ?? worker.heartbeat_at ?? worker.updated_at) as
+                                  | string
+                                  | null
+                                  | undefined,
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="empty">暂无 worker 数据</p>
+                )}
+              </section>
+            </section>
+
+            <section className="admin-panel">
+              <div className="section-heading">
+                <RotateCcw size={16} />
+                workflow_runs Dead Letter
+              </div>
+              <div className="table-actions">
+                <button
+                  className="icon-button primary"
+                  onClick={() => void recoverWorkflowRunsQueue()}
+                  disabled={busyAction !== null}
+                  type="button"
+                >
+                  <RotateCcw size={16} />
+                  恢复队列
+                </button>
+                <button className="icon-button" onClick={() => void loadOps()} disabled={busyAction !== null}>
+                  <RefreshCw size={16} />
+                  刷新
+                </button>
+              </div>
+              {opsRecoverResult ? <pre className="ops-json">{opsRecoverResult}</pre> : null}
+              {opsDeadJobs.length > 0 ? (
+                <div className="chunk-list">
+                  {opsDeadJobs.slice(0, 6).map((job, index) => (
+                    <article className="chunk-card" key={`${readText(job, ["job_id", "id", "run_id"], "job")}-${index}`}>
+                      <div>
+                        <strong>Job {readText(job, ["job_id", "id", "run_id"], `#${index + 1}`)}</strong>
+                        <small>
+                          run {readText(job, ["run_id"])} · workflow {readText(job, ["workflow_id"])} ·{" "}
+                          {readText(job, ["status"], "dead")}
+                        </small>
+                        <small>
+                          failed {formatDate((job.failed_at ?? job.updated_at ?? job.created_at) as string | null | undefined)}
+                        </small>
+                      </div>
+                      <p>{readText(job, ["error_message", "error"], "无错误摘要")}</p>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty">暂无 dead jobs</p>
+              )}
+            </section>
+          </section>
+        ) : null}
+
         {activeSection === "models" ? (
           <section className="admin-page">
             <AdminHeader
               eyebrow="Models"
               title="Model Providers & Configs"
-              description="查看模型 provider 以及关联 model config。"
+              description="管理模型 provider、密钥引用和可绑定到 LLM 节点的 model config。"
               onRefresh={loadModels}
               busy={busyAction !== null}
             />
+            <section className="admin-grid">
+              <form className="admin-form" onSubmit={createModelProvider}>
+                <div className="section-heading">
+                  <Database size={16} />
+                  新建 Provider
+                </div>
+                <label>
+                  <span>name</span>
+                  <input
+                    required
+                    value={modelProviderForm.name}
+                    onChange={(event) => setModelProviderForm((form) => ({ ...form, name: event.target.value }))}
+                  />
+                </label>
+                <div className="inline-fields">
+                  <label>
+                    <span>type</span>
+                    <select
+                      value={modelProviderForm.provider_type}
+                      onChange={(event) =>
+                        setModelProviderForm((form) => ({ ...form, provider_type: event.target.value }))
+                      }
+                    >
+                      <option value="mock">mock</option>
+                      <option value="deepseek">deepseek</option>
+                      <option value="openai">openai</option>
+                      <option value="custom">custom</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>status</span>
+                    <select
+                      value={modelProviderForm.status}
+                      onChange={(event) => setModelProviderForm((form) => ({ ...form, status: event.target.value }))}
+                    >
+                      <option value="active">active</option>
+                      <option value="disabled">disabled</option>
+                    </select>
+                  </label>
+                </div>
+                <label>
+                  <span>base_url</span>
+                  <input
+                    value={modelProviderForm.base_url}
+                    onChange={(event) => setModelProviderForm((form) => ({ ...form, base_url: event.target.value }))}
+                  />
+                </label>
+                <label>
+                  <span>config JSON</span>
+                  <textarea
+                    value={modelProviderForm.config}
+                    onChange={(event) => {
+                      setModelProviderForm((form) => ({ ...form, config: event.target.value }));
+                      setModelProviderConfigError(null);
+                    }}
+                    spellCheck={false}
+                  />
+                  {modelProviderConfigError ? <small className="error-text">{modelProviderConfigError}</small> : null}
+                </label>
+                <button className="icon-button primary" disabled={busyAction !== null}>
+                  <Plus size={16} />
+                  创建 Provider
+                </button>
+              </form>
+
+              <form className="admin-form" onSubmit={createModelConfig}>
+                <div className="section-heading">
+                  <FileJson size={16} />
+                  新建 Model Config
+                </div>
+                <label>
+                  <span>provider</span>
+                  <select
+                    required
+                    value={modelConfigForm.provider_id}
+                    onChange={(event) => setModelConfigForm((form) => ({ ...form, provider_id: event.target.value }))}
+                  >
+                    <option value="">选择 Provider</option>
+                    {modelProviders.map((provider) => (
+                      <option key={provider.id} value={provider.id}>
+                        {provider.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="inline-fields">
+                  <label>
+                    <span>model_name</span>
+                    <input
+                      required
+                      value={modelConfigForm.model_name}
+                      onChange={(event) =>
+                        setModelConfigForm((form) => ({ ...form, model_name: event.target.value }))
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>type</span>
+                    <select
+                      value={modelConfigForm.model_type}
+                      onChange={(event) =>
+                        setModelConfigForm((form) => ({ ...form, model_type: event.target.value }))
+                      }
+                    >
+                      <option value="chat">chat</option>
+                      <option value="embedding">embedding</option>
+                      <option value="rerank">rerank</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="inline-fields">
+                  <label>
+                    <span>display_name</span>
+                    <input
+                      value={modelConfigForm.display_name}
+                      onChange={(event) =>
+                        setModelConfigForm((form) => ({ ...form, display_name: event.target.value }))
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>context_window</span>
+                    <input
+                      min={1}
+                      type="number"
+                      value={modelConfigForm.context_window}
+                      onChange={(event) =>
+                        setModelConfigForm((form) => ({ ...form, context_window: event.target.value }))
+                      }
+                    />
+                  </label>
+                </div>
+                <label>
+                  <span>default_config JSON</span>
+                  <textarea
+                    value={modelConfigForm.default_config}
+                    onChange={(event) => {
+                      setModelConfigForm((form) => ({ ...form, default_config: event.target.value }));
+                      setModelConfigError(null);
+                    }}
+                    spellCheck={false}
+                  />
+                  {modelConfigError ? <small className="error-text">{modelConfigError}</small> : null}
+                </label>
+                <button className="icon-button primary" disabled={busyAction !== null}>
+                  <Plus size={16} />
+                  创建 Config
+                </button>
+              </form>
+            </section>
+
             <section className="model-grid">
               {modelProviders.map((provider) => (
                 <article className="model-provider-card" key={provider.id}>
-                  <div>
-                    <strong>{provider.name}</strong>
-                    <span>{provider.provider_type}</span>
-                    <small>{provider.base_url || "no base_url"}</small>
+                  <div className="model-card-heading">
+                    <div>
+                      <strong>{provider.name}</strong>
+                      <span>
+                        #{provider.id} · {provider.provider_type} · {provider.status}
+                      </span>
+                      <small>{provider.base_url || "no base_url"}</small>
+                    </div>
                   </div>
-                  <DataTable
-                    emptyText="暂无 configs"
-                    rows={modelConfigs
+                  <div className="edit-fields">
+                    <label>
+                      <span>name</span>
+                      <input
+                        value={modelProviderDrafts[provider.id]?.name ?? provider.name}
+                        onChange={(event) =>
+                          setModelProviderDrafts((drafts) => ({
+                            ...drafts,
+                            [provider.id]: {
+                              name: event.target.value,
+                              provider_type: drafts[provider.id]?.provider_type ?? provider.provider_type,
+                              base_url: drafts[provider.id]?.base_url ?? provider.base_url ?? "",
+                              status: drafts[provider.id]?.status ?? provider.status,
+                              config: drafts[provider.id]?.config ?? stringifyJson(provider.config_json ?? {}),
+                              error: null,
+                            },
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>type</span>
+                      <select
+                        value={modelProviderDrafts[provider.id]?.provider_type ?? provider.provider_type}
+                        onChange={(event) =>
+                          setModelProviderDrafts((drafts) => ({
+                            ...drafts,
+                            [provider.id]: {
+                              name: drafts[provider.id]?.name ?? provider.name,
+                              provider_type: event.target.value,
+                              base_url: drafts[provider.id]?.base_url ?? provider.base_url ?? "",
+                              status: drafts[provider.id]?.status ?? provider.status,
+                              config: drafts[provider.id]?.config ?? stringifyJson(provider.config_json ?? {}),
+                              error: null,
+                            },
+                          }))
+                        }
+                      >
+                        <option value="mock">mock</option>
+                        <option value="deepseek">deepseek</option>
+                        <option value="openai">openai</option>
+                        <option value="custom">custom</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="edit-fields">
+                    <label>
+                      <span>base_url</span>
+                      <input
+                        value={modelProviderDrafts[provider.id]?.base_url ?? provider.base_url ?? ""}
+                        onChange={(event) =>
+                          setModelProviderDrafts((drafts) => ({
+                            ...drafts,
+                            [provider.id]: {
+                              name: drafts[provider.id]?.name ?? provider.name,
+                              provider_type: drafts[provider.id]?.provider_type ?? provider.provider_type,
+                              base_url: event.target.value,
+                              status: drafts[provider.id]?.status ?? provider.status,
+                              config: drafts[provider.id]?.config ?? stringifyJson(provider.config_json ?? {}),
+                              error: null,
+                            },
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>status</span>
+                      <select
+                        value={modelProviderDrafts[provider.id]?.status ?? provider.status}
+                        onChange={(event) =>
+                          setModelProviderDrafts((drafts) => ({
+                            ...drafts,
+                            [provider.id]: {
+                              name: drafts[provider.id]?.name ?? provider.name,
+                              provider_type: drafts[provider.id]?.provider_type ?? provider.provider_type,
+                              base_url: drafts[provider.id]?.base_url ?? provider.base_url ?? "",
+                              status: event.target.value,
+                              config: drafts[provider.id]?.config ?? stringifyJson(provider.config_json ?? {}),
+                              error: null,
+                            },
+                          }))
+                        }
+                      >
+                        <option value="active">active</option>
+                        <option value="disabled">disabled</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label className="stacked-field">
+                    <span>config JSON</span>
+                    <textarea
+                      value={modelProviderDrafts[provider.id]?.config ?? stringifyJson(provider.config_json ?? {})}
+                      onChange={(event) =>
+                        setModelProviderDrafts((drafts) => ({
+                          ...drafts,
+                          [provider.id]: {
+                            name: drafts[provider.id]?.name ?? provider.name,
+                            provider_type: drafts[provider.id]?.provider_type ?? provider.provider_type,
+                            base_url: drafts[provider.id]?.base_url ?? provider.base_url ?? "",
+                            status: drafts[provider.id]?.status ?? provider.status,
+                            config: event.target.value,
+                            error: null,
+                          },
+                        }))
+                      }
+                      spellCheck={false}
+                    />
+                  </label>
+                  {modelProviderDrafts[provider.id]?.error ? (
+                    <small className="error-text">{modelProviderDrafts[provider.id]?.error}</small>
+                  ) : null}
+                  <button
+                    className="icon-button primary"
+                    disabled={busyAction !== null}
+                    onClick={() => void updateModelProvider(provider.id)}
+                    type="button"
+                  >
+                    <Save size={16} />
+                    保存 Provider
+                  </button>
+                  <div className="model-config-list">
+                    {modelConfigs
                       .filter((config) => config.provider_id === provider.id)
-                      .map((config) => [
-                        config.model_name,
-                        config.model_type,
-                        config.display_name ?? "-",
-                        String(config.context_window ?? "-"),
-                        config.status,
-                      ])}
-                    headers={["Model", "Type", "Display", "Context", "Status"]}
-                  />
+                      .map((config) => (
+                        <div className="model-config-row" key={config.id}>
+                          <div>
+                            <strong>{config.model_name}</strong>
+                            <small>
+                              #{config.id} · {config.model_type} · {config.status}
+                            </small>
+                          </div>
+                          <div className="edit-fields">
+                            <label>
+                              <span>model_name</span>
+                              <input
+                                value={modelConfigDrafts[config.id]?.model_name ?? config.model_name}
+                                onChange={(event) =>
+                                  setModelConfigDrafts((drafts) => ({
+                                    ...drafts,
+                                    [config.id]: {
+                                      provider_id: drafts[config.id]?.provider_id ?? String(config.provider_id),
+                                      model_name: event.target.value,
+                                      model_type: drafts[config.id]?.model_type ?? config.model_type,
+                                      display_name: drafts[config.id]?.display_name ?? config.display_name ?? "",
+                                      context_window:
+                                        drafts[config.id]?.context_window ??
+                                        (config.context_window ? String(config.context_window) : ""),
+                                      default_config:
+                                        drafts[config.id]?.default_config ?? stringifyJson(config.default_config ?? {}),
+                                      status: drafts[config.id]?.status ?? config.status,
+                                      error: null,
+                                    },
+                                  }))
+                                }
+                              />
+                            </label>
+                            <label>
+                              <span>type</span>
+                              <select
+                                value={modelConfigDrafts[config.id]?.model_type ?? config.model_type}
+                                onChange={(event) =>
+                                  setModelConfigDrafts((drafts) => ({
+                                    ...drafts,
+                                    [config.id]: {
+                                      provider_id: drafts[config.id]?.provider_id ?? String(config.provider_id),
+                                      model_name: drafts[config.id]?.model_name ?? config.model_name,
+                                      model_type: event.target.value,
+                                      display_name: drafts[config.id]?.display_name ?? config.display_name ?? "",
+                                      context_window:
+                                        drafts[config.id]?.context_window ??
+                                        (config.context_window ? String(config.context_window) : ""),
+                                      default_config:
+                                        drafts[config.id]?.default_config ?? stringifyJson(config.default_config ?? {}),
+                                      status: drafts[config.id]?.status ?? config.status,
+                                      error: null,
+                                    },
+                                  }))
+                                }
+                              >
+                                <option value="chat">chat</option>
+                                <option value="embedding">embedding</option>
+                                <option value="rerank">rerank</option>
+                              </select>
+                            </label>
+                          </div>
+                          <div className="edit-fields">
+                            <label>
+                              <span>display_name</span>
+                              <input
+                                value={modelConfigDrafts[config.id]?.display_name ?? config.display_name ?? ""}
+                                onChange={(event) =>
+                                  setModelConfigDrafts((drafts) => ({
+                                    ...drafts,
+                                    [config.id]: {
+                                      provider_id: drafts[config.id]?.provider_id ?? String(config.provider_id),
+                                      model_name: drafts[config.id]?.model_name ?? config.model_name,
+                                      model_type: drafts[config.id]?.model_type ?? config.model_type,
+                                      display_name: event.target.value,
+                                      context_window:
+                                        drafts[config.id]?.context_window ??
+                                        (config.context_window ? String(config.context_window) : ""),
+                                      default_config:
+                                        drafts[config.id]?.default_config ?? stringifyJson(config.default_config ?? {}),
+                                      status: drafts[config.id]?.status ?? config.status,
+                                      error: null,
+                                    },
+                                  }))
+                                }
+                              />
+                            </label>
+                            <label>
+                              <span>status</span>
+                              <select
+                                value={modelConfigDrafts[config.id]?.status ?? config.status}
+                                onChange={(event) =>
+                                  setModelConfigDrafts((drafts) => ({
+                                    ...drafts,
+                                    [config.id]: {
+                                      provider_id: drafts[config.id]?.provider_id ?? String(config.provider_id),
+                                      model_name: drafts[config.id]?.model_name ?? config.model_name,
+                                      model_type: drafts[config.id]?.model_type ?? config.model_type,
+                                      display_name: drafts[config.id]?.display_name ?? config.display_name ?? "",
+                                      context_window:
+                                        drafts[config.id]?.context_window ??
+                                        (config.context_window ? String(config.context_window) : ""),
+                                      default_config:
+                                        drafts[config.id]?.default_config ?? stringifyJson(config.default_config ?? {}),
+                                      status: event.target.value,
+                                      error: null,
+                                    },
+                                  }))
+                                }
+                              >
+                                <option value="active">active</option>
+                                <option value="disabled">disabled</option>
+                              </select>
+                            </label>
+                          </div>
+                          <label className="stacked-field">
+                            <span>default_config JSON</span>
+                            <textarea
+                              value={modelConfigDrafts[config.id]?.default_config ?? stringifyJson(config.default_config ?? {})}
+                              onChange={(event) =>
+                                setModelConfigDrafts((drafts) => ({
+                                  ...drafts,
+                                  [config.id]: {
+                                    provider_id: drafts[config.id]?.provider_id ?? String(config.provider_id),
+                                    model_name: drafts[config.id]?.model_name ?? config.model_name,
+                                    model_type: drafts[config.id]?.model_type ?? config.model_type,
+                                    display_name: drafts[config.id]?.display_name ?? config.display_name ?? "",
+                                    context_window:
+                                      drafts[config.id]?.context_window ??
+                                      (config.context_window ? String(config.context_window) : ""),
+                                    default_config: event.target.value,
+                                    status: drafts[config.id]?.status ?? config.status,
+                                    error: null,
+                                  },
+                                }))
+                              }
+                              spellCheck={false}
+                            />
+                          </label>
+                          {modelConfigDrafts[config.id]?.error ? (
+                            <small className="error-text">{modelConfigDrafts[config.id]?.error}</small>
+                          ) : null}
+                          <button
+                            className="icon-button"
+                            disabled={busyAction !== null}
+                            onClick={() => void updateModelConfig(config.id)}
+                            type="button"
+                          >
+                            <Save size={16} />
+                            保存 Config
+                          </button>
+                        </div>
+                      ))}
+                    {modelConfigs.filter((config) => config.provider_id === provider.id).length === 0 ? (
+                      <p className="empty">暂无 configs</p>
+                    ) : null}
+                  </div>
                 </article>
               ))}
               {modelProviders.length === 0 ? <p className="empty">暂无 model provider</p> : null}
@@ -2393,983 +3805,4 @@ export default function Home() {
       </section>
     </main>
   );
-}
-
-function AdminHeader({
-  eyebrow,
-  title,
-  description,
-  onRefresh,
-  busy,
-}: {
-  eyebrow: string;
-  title: string;
-  description: string;
-  onRefresh: () => void;
-  busy: boolean;
-}) {
-  return (
-    <header className="admin-header">
-      <div>
-        <p className="eyebrow">{eyebrow}</p>
-        <h2>{title}</h2>
-        <p>{description}</p>
-      </div>
-      <button className="icon-button" onClick={onRefresh} disabled={busy}>
-        <RefreshCw size={16} />
-        刷新
-      </button>
-    </header>
-  );
-}
-
-function DataTable({
-  headers,
-  rows,
-  emptyText,
-}: {
-  headers: string[];
-  rows: string[][];
-  emptyText: string;
-}) {
-  if (rows.length === 0) {
-    return <p className="empty">{emptyText}</p>;
-  }
-
-  return (
-    <div className="data-table-wrap">
-      <table className="data-table">
-        <thead>
-          <tr>
-            {headers.map((header) => (
-              <th key={header}>{header}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, rowIndex) => (
-            <tr key={`${row[0]}-${rowIndex}`}>
-              {row.map((cell, cellIndex) => (
-                <td key={`${cell}-${cellIndex}`}>{cell}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function ValidationView({
-  validation,
-  onSelectNode,
-}: {
-  validation: ValidationResult;
-  onSelectNode: (nodeId: string) => void;
-}) {
-  const issues = [...validation.errors, ...validation.warnings];
-  if (issues.length === 0) {
-    return <p className="success-text">valid</p>;
-  }
-  return (
-    <ul className="issue-list">
-      {issues.map((issue) => (
-        <li key={`${issue.code}-${issue.path}`}>
-          <strong>{issue.code}</strong>
-          <span>{issue.message}</span>
-          <small>{issue.path}</small>
-          {issue.node_id ? (
-            <button className="text-button" onClick={() => onSelectNode(issue.node_id as string)}>
-              定位节点
-            </button>
-          ) : null}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function VersionCodePanel({
-  workflow,
-  version,
-}: {
-  workflow: Workflow | null;
-  version: WorkflowVersion | null;
-}) {
-  if (!workflow) {
-    return (
-      <section className="version-code-panel">
-        <div>
-          <span>版本代码</span>
-          <strong>未选择工作流</strong>
-        </div>
-      </section>
-    );
-  }
-  if (!workflow.current_version_id) {
-    return (
-      <section className="version-code-panel">
-        <div>
-          <span>版本代码</span>
-          <strong>当前工作流尚未发布</strong>
-        </div>
-      </section>
-    );
-  }
-
-  return (
-    <section className="version-code-panel">
-      <div>
-        <span>版本</span>
-        <strong>v{version?.version ?? workflow.current_version ?? workflow.current_version_id}</strong>
-      </div>
-      <div>
-        <span>code_path</span>
-        <code>{version ? (version.code_path ?? "未生成") : "版本详情未加载"}</code>
-      </div>
-      <div>
-        <span>code_hash</span>
-        <code>{version ? (version.code_hash ?? "未生成") : "版本详情未加载"}</code>
-      </div>
-      <div>
-        <span>generated_at</span>
-        <strong>{formatDate(version?.code_generated_at)}</strong>
-      </div>
-    </section>
-  );
-}
-
-function RunHistoryView({
-  runs,
-  activeRunId,
-  busy,
-  onLoadTrace,
-}: {
-  runs: RunListItem[];
-  activeRunId: number | null;
-  busy: boolean;
-  onLoadTrace: (runId: number) => void;
-}) {
-  if (runs.length === 0) {
-    return <p className="empty">暂无运行记录</p>;
-  }
-
-  return (
-    <div className="run-history">
-      {runs.map((run) => {
-        const runId = getRunId(run);
-        if (runId === null) {
-          return null;
-        }
-        return (
-          <button
-            key={runId}
-            className={`run-history-item${activeRunId === runId ? " active" : ""}`}
-            disabled={busy}
-            onClick={() => onLoadTrace(runId)}
-            type="button"
-          >
-            <span>#{runId}</span>
-            <strong>{run.status}</strong>
-            <small>{formatDate(run.created_at)}</small>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function TraceView({ trace, onSelectNode }: { trace: RunTrace; onSelectNode: (nodeId: string) => void }) {
-  const output = trace.run.output_json ? JSON.stringify(trace.run.output_json, null, 2) : "{}";
-  const metadata = trace.run.metadata_json ?? {};
-  return (
-    <div className="trace">
-      <section className="trace-code-metadata">
-        <div>
-          <span>code_path_at_run</span>
-          <code>{metadataText(metadata.code_path_at_run)}</code>
-        </div>
-        <div>
-          <span>code_hash_at_run</span>
-          <code>{metadataText(metadata.code_hash_at_run)}</code>
-        </div>
-        <div>
-          <span>code_modified</span>
-          <strong className={metadata.code_modified === true ? "warning-text" : "success-text"}>
-            {metadata.code_modified === true ? "true" : metadata.code_modified === false ? "false" : "unknown"}
-          </strong>
-        </div>
-        {trace.run.error_code ? (
-          <div>
-            <span>error</span>
-            <code>{trace.run.error_message ? `${trace.run.error_code}: ${trace.run.error_message}` : trace.run.error_code}</code>
-          </div>
-        ) : null}
-      </section>
-      <pre>{output}</pre>
-      <ol>
-        {trace.nodes.map((node) => (
-          <li key={node.id}>
-            <details className={`trace-node trace-${normalizeStatus(node.status)}`}>
-              <summary>
-                <strong>{node.node_name ?? node.node_id}</strong>
-                <span>{node.status}</span>
-                <small>{node.duration_ms ?? 0}ms</small>
-                <button
-                  className="text-button"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    onSelectNode(node.node_id);
-                  }}
-                  type="button"
-                >
-                  定位
-                </button>
-              </summary>
-              <div className="trace-node-payload">
-                <label>
-                  <span>input</span>
-                  <pre>{jsonText(node.input_json ?? {})}</pre>
-                </label>
-                <label>
-                  <span>output</span>
-                  <pre>{jsonText(node.output_json ?? {})}</pre>
-                </label>
-                {node.metadata_json ? (
-                  <label>
-                    <span>metadata</span>
-                    <pre>{jsonText(node.metadata_json)}</pre>
-                  </label>
-                ) : null}
-                {node.error_code || node.error_message ? (
-                  <label>
-                    <span>error</span>
-                    <pre>{jsonText({ code: node.error_code, message: node.error_message })}</pre>
-                  </label>
-                ) : null}
-              </div>
-            </details>
-          </li>
-        ))}
-      </ol>
-    </div>
-  );
-}
-
-function StructuredNodeConfig({
-  node,
-  knowledgeBases,
-  modelConfigs,
-  tools,
-  onConfigChange,
-}: {
-  node: GraphNode;
-  knowledgeBases: KnowledgeBase[];
-  modelConfigs: ModelConfig[];
-  tools: ApiTool[];
-  onConfigChange: (patch: JsonObject) => void;
-}) {
-  const config = node.config ?? {};
-  const chatModels = modelConfigs.filter((configItem) => configItem.model_type === "chat");
-
-  if (node.type === "knowledge_base") {
-    const selectedKnowledgeBaseId = Array.isArray(config.knowledge_base_ids)
-      ? String(config.knowledge_base_ids[0] ?? "")
-      : String(config.knowledge_base_id ?? "");
-    return (
-      <section className="structured-node-config">
-        <div className="node-subheading">
-          <Database size={14} />
-          Knowledge 配置
-        </div>
-        <label>
-          <span>knowledge_base</span>
-          <select
-            value={selectedKnowledgeBaseId}
-            onChange={(event) => {
-              const nextId = Number(event.target.value);
-              onConfigChange({ knowledge_base_ids: Number.isFinite(nextId) && nextId > 0 ? [nextId] : [] });
-            }}
-          >
-            <option value="">选择知识库</option>
-            {knowledgeBases.map((knowledgeBase) => (
-              <option key={knowledgeBase.id} value={knowledgeBase.id}>
-                {knowledgeBase.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span>query template</span>
-          <input
-            value={configString(config, "query", "{{input.user_query}}")}
-            onChange={(event) => onConfigChange({ query: event.target.value })}
-          />
-        </label>
-        <div className="inline-fields">
-          <label>
-            <span>top_k</span>
-            <input
-              min={1}
-              max={50}
-              type="number"
-              value={configNumber(config, "top_k", 5)}
-              onChange={(event) => onConfigChange({ top_k: Number(event.target.value) })}
-            />
-          </label>
-          <label>
-            <span>score_threshold</span>
-            <input
-              max={1}
-              min={0}
-              step={0.05}
-              type="number"
-              value={configNumber(config, "score_threshold", 0)}
-              onChange={(event) => onConfigChange({ score_threshold: Number(event.target.value) })}
-            />
-          </label>
-        </div>
-      </section>
-    );
-  }
-
-  if (node.type === "llm") {
-    const provider = configString(config, "provider", "mock");
-    const model = configString(config, "model", provider === "mock" ? "local-mock" : "gpt-4.1-mini");
-    return (
-      <section className="structured-node-config">
-        <div className="node-subheading">
-          <Bot size={14} />
-          LLM 配置
-        </div>
-        <div className="inline-fields">
-          <label>
-            <span>provider</span>
-            <select value={provider} onChange={(event) => onConfigChange({ provider: event.target.value })}>
-              <option value="mock">mock</option>
-              <option value="openai">openai</option>
-            </select>
-          </label>
-          <label>
-            <span>model</span>
-            <select value={model} onChange={(event) => onConfigChange({ model: event.target.value })}>
-              <option value={model}>{model}</option>
-              {chatModels
-                .filter((modelConfig) => modelConfig.model_name !== model)
-                .map((modelConfig) => (
-                  <option key={modelConfig.id} value={modelConfig.model_name}>
-                    {modelConfig.display_name ?? modelConfig.model_name}
-                  </option>
-                ))}
-            </select>
-          </label>
-        </div>
-        <label>
-          <span>system_prompt</span>
-          <textarea
-            value={configString(config, "system_prompt", "")}
-            onChange={(event) => onConfigChange({ system_prompt: event.target.value })}
-          />
-        </label>
-        <label>
-          <span>user_prompt</span>
-          <textarea
-            value={configString(config, "user_prompt", "问题：{{input.user_query}}")}
-            onChange={(event) => onConfigChange({ user_prompt: event.target.value })}
-          />
-        </label>
-        <label>
-          <span>temperature</span>
-          <input
-            max={2}
-            min={0}
-            step={0.1}
-            type="number"
-            value={configNumber(config, "temperature", 0.2)}
-            onChange={(event) => onConfigChange({ temperature: Number(event.target.value) })}
-          />
-        </label>
-      </section>
-    );
-  }
-
-  if (node.type === "api") {
-    const selectedToolId = String(config.tool_id ?? "");
-    return (
-      <section className="structured-node-config">
-        <div className="node-subheading">
-          <Wrench size={14} />
-          API 配置
-        </div>
-        <label>
-          <span>tool preset</span>
-          <select
-            value={selectedToolId}
-            onChange={(event) => {
-              const toolId = Number(event.target.value);
-              const tool = tools.find((item) => item.id === toolId);
-              const toolConfig = isPlainObject(tool?.config_json) ? tool.config_json : {};
-              onConfigChange({ ...toolConfig, tool_id: Number.isFinite(toolId) && toolId > 0 ? toolId : null });
-            }}
-          >
-            <option value="">不使用 preset</option>
-            {tools.map((tool) => (
-              <option key={tool.id} value={tool.id}>
-                {tool.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="inline-fields">
-          <label>
-            <span>mode</span>
-            <select
-              value={configString(config, "mode", "mock")}
-              onChange={(event) => onConfigChange({ mode: event.target.value })}
-            >
-              <option value="mock">mock</option>
-              <option value="http">http</option>
-            </select>
-          </label>
-          <label>
-            <span>method</span>
-            <select
-              value={configString(config, "method", "GET")}
-              onChange={(event) => onConfigChange({ method: event.target.value })}
-            >
-              {["GET", "POST", "PUT", "PATCH", "DELETE"].map((method) => (
-                <option key={method} value={method}>
-                  {method}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <label>
-          <span>url</span>
-          <input
-            value={configString(config, "url", "")}
-            onChange={(event) => onConfigChange({ url: event.target.value })}
-          />
-        </label>
-        <label>
-          <span>timeout_seconds</span>
-          <input
-            min={1}
-            max={120}
-            type="number"
-            value={configNumber(config, "timeout_seconds", configNumber(config, "timeout", 30))}
-            onChange={(event) => onConfigChange({ timeout_seconds: Number(event.target.value) })}
-          />
-        </label>
-      </section>
-    );
-  }
-
-  return null;
-}
-
-function graphToFlowNodes(
-  graph: WorkflowGraph,
-  selectedNodeId: string | null,
-  statusByNodeId: Map<string, string>,
-  currentNodes: Node[],
-): Node[] {
-  return graph.nodes.map((node) => {
-    const currentNode = currentNodes.find((item) => item.id === node.id);
-    const status = statusByNodeId.get(node.id);
-    return {
-      id: node.id,
-      position: node.position,
-      data: {
-        label: (
-          <div className="node-card">
-            <span>{node.name}</span>
-            <small>{node.type}</small>
-          </div>
-        ),
-        nodeType: node.type,
-      },
-      className: getFlowNodeClassName(node, status),
-      selected: node.id === selectedNodeId,
-      dragging: currentNode?.dragging,
-    };
-  });
-}
-
-function graphToFlowEdges(graph: WorkflowGraph, currentEdges: Edge[]): Edge[] {
-  return graph.edges.map((edge) => {
-    const currentEdge = currentEdges.find((item) => item.id === edge.id);
-    return {
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
-      label: edge.label,
-      selected: currentEdge?.selected,
-      animated: false,
-    };
-  });
-}
-
-function flowEdgesToGraphEdges(edges: Edge[]): GraphEdge[] {
-  return edges
-    .filter((edge) => edge.source && edge.target)
-    .map((edge) => ({
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
-      label: typeof edge.label === "string" ? edge.label : undefined,
-    }));
-}
-
-function createKnowledgeDemoGraph(knowledgeBaseId: number | null): WorkflowGraph {
-  const knowledgeBaseIds = knowledgeBaseId ? [knowledgeBaseId] : [];
-  return {
-    schema_version: "1.0",
-    nodes: [
-      {
-        id: "start_1",
-        type: "start",
-        name: "开始",
-        position: { x: 80, y: 160 },
-        config: {},
-      },
-      {
-        id: "input_1",
-        type: "input",
-        name: "用户输入",
-        position: { x: 280, y: 160 },
-        config: {
-          fields: [{ name: "user_query", type: "string", label: "用户问题", required: true }],
-        },
-        output_mapping: { user_query: "variables.user_query" },
-      },
-      {
-        id: "kb_1",
-        type: "knowledge_base",
-        name: "检索知识库",
-        position: { x: 500, y: 160 },
-        config: {
-          knowledge_base_ids: knowledgeBaseIds,
-          query: "{{question}}",
-          retrieval_mode: "vector",
-          top_k: 3,
-          score_threshold: 0,
-        },
-        input_mapping: { question: "{{input.user_query}}" },
-        output_mapping: { chunks: "variables.kb_context" },
-      },
-      {
-        id: "output_1",
-        type: "output",
-        name: "最终输出",
-        position: { x: 720, y: 160 },
-        config: {
-          outputs: {
-            query: "{{input.user_query}}",
-            chunks: "{{variables.kb_context}}",
-          },
-        },
-      },
-      {
-        id: "end_1",
-        type: "end",
-        name: "结束",
-        position: { x: 920, y: 160 },
-        config: {},
-      },
-    ],
-    edges: [
-      { id: "e1", source: "start_1", target: "input_1" },
-      { id: "e2", source: "input_1", target: "kb_1" },
-      { id: "e3", source: "kb_1", target: "output_1" },
-      { id: "e4", source: "output_1", target: "end_1" },
-    ],
-  };
-}
-
-function createIntentBranchDemoGraph(): WorkflowGraph {
-  return {
-    schema_version: "1.0",
-    nodes: [
-      {
-        id: "start_1",
-        type: "start",
-        name: "开始",
-        position: { x: 80, y: 190 },
-        config: {},
-      },
-      {
-        id: "input_1",
-        type: "input",
-        name: "用户输入",
-        position: { x: 280, y: 190 },
-        config: {
-          fields: [{ name: "user_query", type: "string", label: "用户问题", required: true }],
-        },
-        output_mapping: { user_query: "variables.user_query" },
-      },
-      {
-        id: "intent_1",
-        type: "intent",
-        name: "识别意图",
-        position: { x: 500, y: 190 },
-        config: {
-          provider: "keyword",
-          intents: [
-            { name: "refund_request", description: "refund 退款 用户申请退款" },
-            { name: "general_question", description: "general 普通咨询" },
-          ],
-          fallback_intent: "general_question",
-        },
-        input_mapping: { text: "{{input.user_query}}" },
-        output_mapping: {
-          intent: "variables.intent_result.intent",
-          confidence: "variables.intent_result.confidence",
-        },
-      },
-      {
-        id: "branch_1",
-        type: "branch",
-        name: "按意图分支",
-        position: { x: 720, y: 190 },
-        config: {
-          branches: [
-            {
-              id: "refund",
-              label: "退款",
-              target: "refund_message_1",
-              condition: {
-                left: "{{variables.intent_result.intent}}",
-                operator: "eq",
-                value: "refund_request",
-              },
-            },
-            {
-              id: "general",
-              label: "普通咨询",
-              target: "general_message_1",
-              condition: {
-                left: "{{variables.intent_result.intent}}",
-                operator: "eq",
-                value: "general_question",
-              },
-            },
-          ],
-          default_target: "general_message_1",
-        },
-      },
-      {
-        id: "refund_message_1",
-        type: "message",
-        name: "退款回复",
-        position: { x: 960, y: 90 },
-        config: {
-          message_type: "text",
-          template: "已识别为退款诉求，意图：{{variables.intent_result.intent}}",
-        },
-        output_mapping: { message: "messages" },
-      },
-      {
-        id: "general_message_1",
-        type: "message",
-        name: "普通咨询回复",
-        position: { x: 960, y: 290 },
-        config: {
-          message_type: "text",
-          template: "已进入普通咨询路径，意图：{{variables.intent_result.intent}}",
-        },
-        output_mapping: { message: "messages" },
-      },
-      {
-        id: "refund_output_1",
-        type: "output",
-        name: "退款输出",
-        position: { x: 1180, y: 90 },
-        config: {
-          outputs: {
-            route: "refund",
-            intent: "{{variables.intent_result.intent}}",
-            confidence: "{{variables.intent_result.confidence}}",
-            message: "{{outputs.refund_message_1.message}}",
-            messages: "{{messages}}",
-          },
-        },
-      },
-      {
-        id: "general_output_1",
-        type: "output",
-        name: "普通输出",
-        position: { x: 1180, y: 290 },
-        config: {
-          outputs: {
-            route: "general",
-            intent: "{{variables.intent_result.intent}}",
-            confidence: "{{variables.intent_result.confidence}}",
-            message: "{{outputs.general_message_1.message}}",
-            messages: "{{messages}}",
-          },
-        },
-      },
-      {
-        id: "end_1",
-        type: "end",
-        name: "结束",
-        position: { x: 1400, y: 190 },
-        config: {},
-      },
-    ],
-    edges: [
-      { id: "e1", source: "start_1", target: "input_1" },
-      { id: "e2", source: "input_1", target: "intent_1" },
-      { id: "e3", source: "intent_1", target: "branch_1" },
-      { id: "e4", source: "branch_1", target: "refund_message_1", label: "refund" },
-      { id: "e5", source: "branch_1", target: "general_message_1", label: "general" },
-      { id: "e6", source: "refund_message_1", target: "refund_output_1" },
-      { id: "e7", source: "general_message_1", target: "general_output_1" },
-      { id: "e8", source: "refund_output_1", target: "end_1" },
-      { id: "e9", source: "general_output_1", target: "end_1" },
-    ],
-  };
-}
-
-function createApiMessageDemoGraph(): WorkflowGraph {
-  return {
-    schema_version: "1.0",
-    nodes: [
-      {
-        id: "start_1",
-        type: "start",
-        name: "开始",
-        position: { x: 80, y: 160 },
-        config: {},
-      },
-      {
-        id: "input_1",
-        type: "input",
-        name: "订单输入",
-        position: { x: 280, y: 160 },
-        config: {
-          fields: [
-            { name: "user_query", type: "string", label: "用户问题", required: true },
-            { name: "order_id", type: "string", label: "订单号", required: true },
-          ],
-        },
-        output_mapping: {
-          user_query: "variables.user_query",
-          order_id: "variables.order_id",
-        },
-      },
-      {
-        id: "api_1",
-        type: "api",
-        name: "查询订单 API",
-        position: { x: 500, y: 160 },
-        config: {
-          mode: "mock",
-          method: "POST",
-          url: "https://orders.example.test/lookup",
-          headers: {
-            Authorization: "{{secrets.demo_api_key}}",
-            "X-Order-ID": "{{input.order_id}}",
-          },
-          body: {
-            order_id: "{{input.order_id}}",
-            query: "{{input.user_query}}",
-          },
-          mock_status_code: 200,
-          mock_response: {
-            order_id: "A-1001",
-            order_status: "paid",
-            next_step: "send_message",
-          },
-        },
-        output_mapping: { response: "variables.api_response" },
-      },
-      {
-        id: "message_1",
-        type: "message",
-        name: "生成消息",
-        position: { x: 720, y: 160 },
-        config: {
-          message_type: "text",
-          template: "订单 {{variables.api_response.order_id}} 当前状态：{{variables.api_response.order_status}}",
-        },
-        output_mapping: { message: "messages" },
-      },
-      {
-        id: "output_1",
-        type: "output",
-        name: "最终输出",
-        position: { x: 940, y: 160 },
-        config: {
-          outputs: {
-            api_response: "{{variables.api_response}}",
-            message: "{{outputs.message_1.message}}",
-            messages: "{{messages}}",
-          },
-        },
-      },
-      {
-        id: "end_1",
-        type: "end",
-        name: "结束",
-        position: { x: 1160, y: 160 },
-        config: {},
-      },
-    ],
-    edges: [
-      { id: "e1", source: "start_1", target: "input_1" },
-      { id: "e2", source: "input_1", target: "api_1" },
-      { id: "e3", source: "api_1", target: "message_1" },
-      { id: "e4", source: "message_1", target: "output_1" },
-      { id: "e5", source: "output_1", target: "end_1" },
-    ],
-  };
-}
-
-function createGraphNode(template: NodeCatalogItem, index: number, nodeCount: number): GraphNode {
-  const idSuffix = `${index}_${Date.now().toString(36)}`;
-  return {
-    id: `${template.type}_${idSuffix}`,
-    type: template.type,
-    name: template.label,
-    position: {
-      x: 120 + (nodeCount % 4) * 210,
-      y: 120 + Math.floor(nodeCount / 4) * 130,
-    },
-    config: cloneJsonObject(template.config),
-    input_mapping: cloneJsonObject(template.input_mapping ?? {}),
-    output_mapping: cloneJsonObject(template.output_mapping ?? {}),
-    enabled: true,
-  };
-}
-
-function cloneJsonObject(value: JsonObject): JsonObject {
-  return JSON.parse(JSON.stringify(value)) as JsonObject;
-}
-
-function groupNodeCatalog(items: NodeCatalogItem[]): Array<[string, NodeCatalogItem[]]> {
-  const groups = new Map<string, NodeCatalogItem[]>();
-  items.forEach((item) => {
-    groups.set(item.group, [...(groups.get(item.group) ?? []), item]);
-  });
-  return Array.from(groups.entries());
-}
-
-function parseJsonObject(rawValue: string): { value?: JsonObject; error?: string } {
-  const value = rawValue.trim();
-  if (!value) {
-    return { value: {} };
-  }
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    if (!isPlainObject(parsed)) {
-      return { error: "必须是 JSON 对象，例如 {\"user_query\":\"...\"}" };
-    }
-    return { value: parsed };
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : "JSON 解析失败" };
-  }
-}
-
-function isPlainObject(value: unknown): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function stringifyJson(value: JsonObject): string {
-  return JSON.stringify(value ?? {}, null, 2);
-}
-
-function configString(config: JsonObject, key: string, fallback: string): string {
-  const value = config[key];
-  if (typeof value === "string") {
-    return value;
-  }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  return fallback;
-}
-
-function configNumber(config: JsonObject, key: string, fallback: number): number {
-  const value = config[key];
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === "string") {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-  return fallback;
-}
-
-function makeEdgeId(source: string, target: string, index: number): string {
-  return `edge_${source}_${target}_${index + 1}_${Date.now().toString(36)}`;
-}
-
-function getFlowNodeClassName(node: GraphNode, status?: string): string {
-  return [
-    "flow-node",
-    `node-${node.type}`,
-    node.enabled === false ? "node-disabled" : null,
-    status ? `status-${normalizeStatus(status)}` : null,
-  ]
-    .filter(Boolean)
-    .join(" ");
-}
-
-function normalizeStatus(status: string): string {
-  const normalized = status.toLowerCase();
-  if (normalized === "completed") {
-    return "success";
-  }
-  return normalized;
-}
-
-function nodeChangeHasId(change: NodeChange): change is NodeChange & { id: string } {
-  return "id" in change;
-}
-
-function formatBytes(value?: number | null): string {
-  if (value === null || value === undefined) {
-    return "-";
-  }
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KB`;
-  }
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function formatDate(value?: string | null): string {
-  if (!value) {
-    return "-";
-  }
-  return new Date(value).toLocaleString("zh-CN", { hour12: false });
-}
-
-function getRunId(run: { id?: number; run_id?: number }): number | null {
-  return run.run_id ?? run.id ?? null;
-}
-
-function metadataText(value: unknown): string {
-  if (value === null || value === undefined || value === "") {
-    return "-";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  return JSON.stringify(value);
-}
-
-function jsonText(value: unknown): string {
-  return JSON.stringify(value, null, 2);
 }

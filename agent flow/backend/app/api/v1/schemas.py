@@ -81,12 +81,21 @@ class RunWorkflowRequest(BaseModel):
     execution_mode: Literal["sync", "async"] = "sync"
 
 
+class RetryRunRequest(BaseModel):
+    input: JsonObject | None = None
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class RegenerateWorkflowCodeRequest(BaseModel):
+    force: bool = False
+
+
 class CreateKnowledgeBaseRequest(BaseModel):
     name: str
     description: str | None = None
     embedding_model: str
     embedding_dim: Literal[1536] = 1536
-    tokenizer: str = "cl100k_base"
+    tokenizer: Literal["cl100k_base"] = "cl100k_base"
     slug: str | None = None
     config: JsonObject = Field(default_factory=dict)
 
@@ -95,6 +104,7 @@ class RetrieveKnowledgeRequest(BaseModel):
     query: str
     top_k: int = Field(default=5, ge=1, le=50)
     score_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
+    context_budget_tokens: int | None = Field(default=None, ge=1)
 
 
 class CreateToolRequest(BaseModel):
@@ -106,6 +116,42 @@ class CreateToolRequest(BaseModel):
 
 class TestToolRequest(BaseModel):
     input: JsonObject = Field(default_factory=dict)
+
+
+class CreateModelProviderRequest(BaseModel):
+    name: str
+    provider_type: str
+    base_url: str | None = None
+    status: Literal["active", "disabled"] = "active"
+    config: JsonObject = Field(default_factory=dict)
+
+
+class UpdateModelProviderRequest(BaseModel):
+    name: str | None = None
+    provider_type: str | None = None
+    base_url: str | None = None
+    status: Literal["active", "disabled"] | None = None
+    config: JsonObject | None = None
+
+
+class CreateModelConfigRequest(BaseModel):
+    provider_id: int
+    model_name: str
+    model_type: Literal["chat", "embedding", "rerank"]
+    display_name: str | None = None
+    context_window: int | None = Field(default=None, ge=1)
+    default_config: JsonObject = Field(default_factory=dict)
+    status: Literal["active", "disabled"] = "active"
+
+
+class UpdateModelConfigRequest(BaseModel):
+    provider_id: int | None = None
+    model_name: str | None = None
+    model_type: Literal["chat", "embedding", "rerank"] | None = None
+    display_name: str | None = None
+    context_window: int | None = Field(default=None, ge=1)
+    default_config: JsonObject | None = None
+    status: Literal["active", "disabled"] | None = None
 
 
 class CreateSecretRequest(BaseModel):

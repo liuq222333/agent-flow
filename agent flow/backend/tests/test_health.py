@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from app.api.v1.router import _metric_line
 from app.core.auth import authenticate_api_request
 from app.main import app
 
@@ -20,6 +21,14 @@ class _Settings:
 def test_auth_allows_public_paths() -> None:
     decision = authenticate_api_request("/api/v1/ready", None, _Settings("bearer"))
     assert decision.allowed is True
+
+    metrics_decision = authenticate_api_request("/api/v1/metrics", None, _Settings("bearer"))
+    assert metrics_decision.allowed is True
+
+
+def test_metric_line_escapes_label_values() -> None:
+    line = _metric_line("metric_total", 1, {"status": 'bad"value'})
+    assert line == 'metric_total{status="bad\\"value"} 1'
 
 
 def test_auth_mock_mode_allows_api_requests() -> None:

@@ -39,7 +39,9 @@ if (-not $ready) {
 
 $migrations = @(
   "002_observability_and_governance.sql",
-  "003_generated_workflow_code.sql"
+  "003_generated_workflow_code.sql",
+  "004_worker_heartbeat_and_runtime_indexes.sql",
+  "005_seed_deepseek_default_model.sql"
 )
 
 foreach ($migration in $migrations) {

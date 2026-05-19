@@ -7,9 +7,15 @@ __pycache__/
 .cache/
 node_modules/
 .next/
+frontend/.next/
+frontend/tsconfig.tsbuildinfo
 out/
 dist/
 .env
 *.log
+backend/*.log
+backend/generated_workflows/
+.playwright-mcp/
+*.md
 storage/uploads/*
 !storage/uploads/.gitkeep

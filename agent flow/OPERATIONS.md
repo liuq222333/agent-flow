@@ -12,7 +12,8 @@ MVP 核心链路已经完成：
 - Knowledge 文档上传、worker 处理、pgvector 检索和关键词回退。
 - Intent、Branch、API、Message、LLM、Output 等核心节点闭环。
 - Trace 展示 generated code metadata、节点 input/output/error/metadata，并对敏感 header 做脱敏。
-- `/api/v1/health`、`/api/v1/ready`、`npm run smoke:e2e` 可作为基础部署验收入口。
+- `/api/v1/health`、`/api/v1/ready`、`/api/v1/metrics`、`npm run smoke:e2e` 可作为基础部署验收入口。
+- Ops 队列与 worker 运维入口已支持 workflow/document worker 心跳、workflow run 队列深度、dead-letter 查看和恢复动作。
 
 M6 生产化基础收尾已完成：
 
@@ -38,6 +39,7 @@ M6 生产化基础收尾已完成：
 - 后端和前端源码通过 bind mount 挂入容器，改动会影响运行容器。
 - 上传文件存在 `./storage/uploads` 对应的本地文件系统目录。
 - Redis 对外端口是 `6380`，容器内部地址是 `redis://redis:6379/0`。
+- Docker / 端口验收需要确认 Docker Desktop 可用、`docker compose ps` 中 api/frontend/worker/postgres/redis 正常、API 监听 `8000`、Frontend 监听 `3000`、宿主机 Redis 使用 `6380` 而不是 `6379`。
 - 默认用户通过 `MOCK_USER_ID` 表达本地测试身份，不是完整身份系统。
 - API Node mock 模式用于本地和 smoke；真实 HTTP 模式已有内网地址阻断，但生产仍需外呼治理。
 - Secret 当前由应用配置的 `SECRET_ENCRYPTION_KEY` 加密，并在 API/Trace 中脱敏，不等于 KMS。
@@ -52,7 +54,8 @@ M6 生产化基础收尾已完成：
 - 设置 `DATABASE_URL` 指向生产 PostgreSQL，并确认账号权限最小化。
 - 设置 `REDIS_URL` 指向生产 Redis，注意容器内外主机名和端口差异。
 - 设置 `SECRET_ENCRYPTION_KEY`，长度不少于 32 字符，并通过安全渠道分发。
-- 设置 `OPENAI_API_KEY` 或通过平台 Secret 创建 `openai_api_key`；缺少 key 时 OpenAI 节点会明确失败。
+- 默认 LLM 选项为 DeepSeek V4-Flash，默认关闭 thinking mode；设置 `DEEPSEEK_API_KEY` 或通过平台 Secret 创建 `deepseek_api_key`。缺少 key 时 DeepSeek 节点会明确失败。
+- 如使用 OpenAI，设置 `OPENAI_API_KEY` 或通过平台 Secret 创建 `openai_api_key`。
 - 设置 `CORS_ALLOWED_ORIGINS` 为实际前端域名，删除无关 localhost。
 - 设置 `STORAGE_DIR` 到持久化上传目录或替换为后续对象存储方案。
 - 检查 `MAX_UPLOAD_BYTES` 和 `ALLOWED_UPLOAD_CONTENT_TYPES` 符合环境要求。
@@ -70,12 +73,16 @@ M6 生产化基础收尾已完成：
 - API、`worker-workflow`、`worker-document` 使用同一套 `DATABASE_URL`、`REDIS_URL`、`STORAGE_DIR`、`SECRET_ENCRYPTION_KEY`。
 - 异步工作流必须有 `worker-workflow` 消费 Redis 队列。
 - 文档上传后必须有 `worker-document` 轮询并处理 `document_processing_jobs`。
+- Ops 队列 / worker 运维入口当前覆盖 workflow run 队列积压、workflow/document worker 心跳、dead-letter 任务列表和恢复动作；document worker 处理详情仍以文档任务状态和日志排查为准。
 - worker 日志需要能被运维系统查看；当前仓库只提供 stdout/stderr 日志输出。
 
 ### 3.4 Health / Ready
 
 - `GET /api/v1/health` 返回 `{"status":"ok"}`。
 - `GET /api/v1/ready` 返回 `{"status":"ready"}`。
+- `GET /api/v1/metrics` 返回 Prometheus text 格式指标。
+- `GET /api/v1/ops/queues` 返回 workflow run main / processing / dead-letter 队列深度。
+- `GET /api/v1/ops/workers` 返回最近活跃的 workflow/document worker heartbeat。
 - `/ready` 的 `checks.database`、`checks.redis`、`checks.encryption_key`、`checks.default_model_provider` 均为 `ok`。
 - 若 `/health` 正常但 `/ready` 失败，优先排查数据库、Redis、`SECRET_ENCRYPTION_KEY` 和模型 provider 配置。
 
@@ -109,6 +116,7 @@ npm run smoke:e2e
 - API 日志至少要能按 request/run/workflow/node/error 线索定位问题。
 - `worker-workflow` 日志用于定位异步 run pending、failed 或执行异常。
 - `worker-document` 日志用于定位文档 parse/index failed。
+- workflow/document worker heartbeat 可通过 `/api/v1/ops/workers` 查看。
 - PostgreSQL 和 Redis 日志用于定位连接、容量、持久化和启动问题。
 - 当前仓库未内置集中日志平台、指标采集或告警规则。
 
@@ -159,6 +167,8 @@ npm run smoke:e2e
 
 - 检查 `docker compose ps worker-workflow` 是否运行。
 - 查看 `docker compose logs worker-workflow` 是否有 Redis、DB 或 generated workflow import 错误。
+- 查看 `GET /api/v1/ops/queues` 是否存在 main / processing 队列积压。
+- 查看 `GET /api/v1/ops/workers` 是否存在最近活跃的 `workflow` worker。
 - 检查 `/api/v1/ready` 的 `database` 和 `redis`。
 - 确认 API 和 worker 使用同一个 `REDIS_URL` 和 `DATABASE_URL`。
 - 对单个 run 可查询 `GET /api/v1/runs/{run_id}` 和 `GET /api/v1/runs/{run_id}/trace` 定位状态。
@@ -211,6 +221,7 @@ npm run compose:up
 - `/api/v1/health` 正常。
 - `/api/v1/ready` 为 `ready`。
 - 前端可访问，API base URL 指向正确环境。
+- Docker / 端口映射符合预期：API `8000`、Frontend `3000`、Redis 宿主机 `6380`、容器内 Redis `6379`。
 - workflow 可创建、发布、同步运行、异步运行。
 - `worker-workflow` 能消费异步 run。
 - 知识库文档可上传并 indexed。
