@@ -936,6 +936,10 @@ h1 {
   background: #fff7ed;
 }
 
+.react-flow__node.node-set_variable {
+  background: #ecfeff;
+}
+
 .react-flow__node.node-disabled {
   border-style: dashed;
   opacity: 0.62;
@@ -1115,6 +1119,10 @@ h1 {
 .node-editor-icon.node-api,
 .node-editor-icon.node-message {
   background: #b45309;
+}
+
+.node-editor-icon.node-set_variable {
+  background: #0e7490;
 }
 
 .node-editor-header > div:nth-child(2) {
@@ -1519,6 +1527,10 @@ h1 {
   grid-template-columns: minmax(76px, 0.9fr) minmax(84px, 0.8fr) minmax(0, 1fr) 30px;
 }
 
+.node-param-grid.set-variable-grid {
+  grid-template-columns: minmax(92px, 0.8fr) minmax(0, 1.2fr) 30px;
+}
+
 .node-param-grid.header-row {
   color: var(--muted);
   font-size: 12px;
@@ -1702,6 +1714,10 @@ h1 {
 .reference-node-icon.node-api,
 .reference-node-icon.node-message {
   background: #f97316;
+}
+
+.reference-node-icon.node-set_variable {
+  background: #0e7490;
 }
 
 .reference-node-icon.node-intent,

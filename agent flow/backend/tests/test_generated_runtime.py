@@ -28,6 +28,83 @@ def test_load_generated_workflow_rejects_missing_workflow_file(
     assert exc_info.value.code == "workflow_code_missing"
 
 
+def test_load_generated_workflow_rejects_path_traversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generated_root = tmp_path / "generated_workflows"
+    generated_root.mkdir()
+    outside_file = tmp_path / "outside.py"
+    outside_file.write_text(
+        "async def run(input_data, context):\n    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime, "_GENERATED_ROOT", generated_root.resolve())
+
+    with pytest.raises(runtime.WorkflowCodeError) as exc_info:
+        runtime._load_generated_workflow(
+            str(generated_root / ".." / outside_file.name),
+            published_hash=None,
+        )
+
+    assert exc_info.value.code == "workflow_code_missing"
+    assert "outside generated_workflows" in str(exc_info.value)
+
+
+def test_load_generated_workflow_rejects_backend_prefixed_path_traversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend_root = tmp_path / "backend"
+    generated_root = backend_root / "generated_workflows"
+    generated_root.mkdir(parents=True)
+    outside_file = backend_root / "outside.py"
+    outside_file.write_text(
+        "async def run(input_data, context):\n    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime, "_PROJECT_ROOT", tmp_path.resolve())
+    monkeypatch.setattr(runtime, "_BACKEND_ROOT", backend_root.resolve())
+    monkeypatch.setattr(runtime, "_GENERATED_ROOT", generated_root.resolve())
+
+    with pytest.raises(runtime.WorkflowCodeError) as exc_info:
+        runtime._load_generated_workflow(
+            "backend/generated_workflows/../outside.py",
+            published_hash=None,
+        )
+
+    assert exc_info.value.code == "workflow_code_missing"
+    assert "outside generated_workflows" in str(exc_info.value)
+
+
+def test_load_generated_workflow_rejects_generated_root_prefix_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend_root = tmp_path / "backend"
+    generated_root = backend_root / "generated_workflows"
+    evil_root = backend_root / "generated_workflows_evil"
+    evil_file = evil_root / "workflow.py"
+    evil_root.mkdir(parents=True)
+    generated_root.mkdir(parents=True)
+    evil_file.write_text(
+        "async def run(input_data, context):\n    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime, "_PROJECT_ROOT", tmp_path.resolve())
+    monkeypatch.setattr(runtime, "_BACKEND_ROOT", backend_root.resolve())
+    monkeypatch.setattr(runtime, "_GENERATED_ROOT", generated_root.resolve())
+
+    with pytest.raises(runtime.WorkflowCodeError) as exc_info:
+        runtime._load_generated_workflow(
+            "backend/generated_workflows_evil/workflow.py",
+            published_hash=None,
+        )
+
+    assert exc_info.value.code == "workflow_code_missing"
+    assert "outside generated_workflows" in str(exc_info.value)
+
+
 def test_load_generated_workflow_rejects_missing_async_run_entrypoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

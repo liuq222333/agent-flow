@@ -19,6 +19,18 @@ def test_publish_rejects_disabled_nodes() -> None:
     assert result["errors"][0]["code"] == "disabled_node_in_publish"
 
 
+def test_publish_rejects_llm_node_without_prompt() -> None:
+    graph = deepcopy(default_graph())
+    llm_node = next(node for node in graph["nodes"] if node["type"] == "llm")
+    llm_node["config"].pop("user_prompt", None)
+    llm_node["config"].pop("prompt", None)
+
+    result = validate_graph(graph, "publish")
+
+    assert result["valid"] is False
+    assert any(error["code"] == "missing_llm_prompt" for error in result["errors"])
+
+
 def test_publish_rejects_missing_edge_target() -> None:
     graph = deepcopy(default_graph())
     graph["edges"][0]["target"] = "missing_node"
@@ -90,6 +102,80 @@ def test_publish_rejects_graph_cycle() -> None:
 
     assert result["valid"] is False
     assert any(error["code"] == "graph_cycle_detected" for error in result["errors"])
+
+
+def test_publish_accepts_set_variable_node_with_assignments() -> None:
+    graph = deepcopy(default_graph())
+    graph["nodes"].insert(
+        3,
+        {
+            "id": "set_1",
+            "type": "set_variable",
+            "name": "变量赋值",
+            "position": {"x": 620, "y": 160},
+            "config": {"assignments": {"normalized_query": "{{input.user_query}}"}},
+        },
+    )
+    graph["edges"] = [
+        {"id": "e1", "source": "start_1", "target": "input_1"},
+        {"id": "e2", "source": "input_1", "target": "llm_1"},
+        {"id": "e3", "source": "llm_1", "target": "set_1"},
+        {"id": "e4", "source": "set_1", "target": "output_1"},
+        {"id": "e5", "source": "output_1", "target": "end_1"},
+    ]
+
+    result = validate_graph(graph, "publish")
+
+    assert result["valid"] is True
+
+
+def test_publish_rejects_set_variable_node_without_assignments() -> None:
+    graph = deepcopy(default_graph())
+    graph["nodes"].append(
+        {
+            "id": "set_1",
+            "type": "set_variable",
+            "name": "变量赋值",
+            "position": {"x": 500, "y": 320},
+            "config": {},
+        }
+    )
+    graph["edges"].append({"id": "e5", "source": "llm_1", "target": "set_1"})
+    graph["edges"][2] = {"id": "e3", "source": "set_1", "target": "output_1"}
+
+    result = validate_graph(graph, "publish")
+
+    assert result["valid"] is False
+    assert any(error["code"] == "missing_set_variable_assignments" for error in result["errors"])
+
+
+def test_publish_rejects_api_node_with_invalid_response_limit() -> None:
+    graph = deepcopy(default_graph())
+    api_node = {
+        "id": "api_1",
+        "type": "api",
+        "name": "API",
+        "position": {"x": 620, "y": 160},
+        "config": {
+            "mode": "mock",
+            "method": "GET",
+            "url": "https://api.example.test/orders",
+            "max_response_bytes": 10 * 1024 * 1024,
+        },
+    }
+    graph["nodes"].insert(3, api_node)
+    graph["edges"] = [
+        {"id": "e1", "source": "start_1", "target": "input_1"},
+        {"id": "e2", "source": "input_1", "target": "llm_1"},
+        {"id": "e3", "source": "llm_1", "target": "api_1"},
+        {"id": "e4", "source": "api_1", "target": "output_1"},
+        {"id": "e5", "source": "output_1", "target": "end_1"},
+    ]
+
+    result = validate_graph(graph, "publish")
+
+    assert result["valid"] is False
+    assert any(error["code"] == "invalid_api_max_response_bytes" for error in result["errors"])
 
 
 def test_publish_rejects_branch_target_without_edge() -> None:

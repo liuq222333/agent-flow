@@ -21,6 +21,7 @@ class WorkflowNode(BaseModel):
         "knowledge_base",
         "intent",
         "branch",
+        "set_variable",
         "api",
         "message",
         "output",
@@ -88,6 +89,12 @@ class RetryRunRequest(BaseModel):
 
 class RegenerateWorkflowCodeRequest(BaseModel):
     force: bool = False
+
+
+class SubmitHumanApprovalRequest(BaseModel):
+    decision: Literal["approve", "reject"]
+    response: JsonObject = Field(default_factory=dict)
+    comment: str | None = Field(default=None, max_length=1000)
 
 
 class CreateKnowledgeBaseRequest(BaseModel):

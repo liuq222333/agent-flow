@@ -985,6 +985,51 @@ paths:
         default:
           $ref: "#/components/responses/ErrorResponse"
 
+  /ops/workflow_runs/failed:
+    get:
+      tags: [Ops]
+      summary: List failed workflow runs
+      description: Returns failed workflow_runs for Ops recovery and troubleshooting.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Failed workflow run list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpsFailedWorkflowRunsResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
+  /ops/workflow_runs/{run_id}/recover:
+    post:
+      tags: [Ops]
+      summary: Recover one workflow run
+      description: Requeues a failed, stale, or dead-letter workflow run. Completed, normal running, normal pending, and cancelled runs are not requeued.
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: Single run recovery result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpsSingleWorkflowRunRecoveryResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1086,6 +1131,7 @@ components:
           properties:
             code:
               type: string
+              description: Stable application error code. Runtime/model/API errors include workflow_code_missing, workflow_code_import_failed, workflow_entrypoint_missing, model_api_key_missing, model_request_failed, model_response_invalid, model_timeout, api_response_error, api_request_error, and response_too_large.
             message:
               type: string
             details:
@@ -1238,6 +1284,60 @@ components:
               items:
                 $ref: "#/components/schemas/JsonObject"
 
+    OpsFailedWorkflowRun:
+      type: object
+      required: [run_id, workflow_id, workflow_version_id, status, created_at, updated_at]
+      properties:
+        run_id:
+          type: integer
+          format: int64
+        workflow_id:
+          type: integer
+          format: int64
+        workflow_version_id:
+          type: integer
+          format: int64
+        status:
+          $ref: "#/components/schemas/WorkflowRunStatus"
+        error_code:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    OpsFailedWorkflowRunsResponse:
+      type: object
+      required: [items, count]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/OpsFailedWorkflowRun"
+        count:
+          type: integer
+
+    OpsSingleWorkflowRunRecoveryResponse:
+      type: object
+      required: [run_id, status, recovered, reason, queued]
+      properties:
+        run_id:
+          type: integer
+          format: int64
+        status:
+          $ref: "#/components/schemas/WorkflowRunStatus"
+        recovered:
+          type: boolean
+        reason:
+          type: string
+          enum: [failed, dead_letter, stale, already_completed, already_running, already_pending, cancelled]
+        queued:
+          type: boolean
+
     WorkflowStatus:
       type: string
       enum: [draft, published, archived]
@@ -1252,7 +1352,7 @@ components:
 
     NodeType:
       type: string
-      enum: [start, input, llm, knowledge_base, intent, branch, api, message, output, end]
+      enum: [start, input, llm, knowledge_base, intent, branch, set_variable, api, message, output, end]
 
     WorkflowGraph:
       type: object

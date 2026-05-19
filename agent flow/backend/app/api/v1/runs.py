@@ -37,7 +37,15 @@ async def cleanup_generated_workflows(dry_run: bool = Query(default=False)):
 @router.get("/runs")
 async def list_runs(
     workflow_id: int | None = None,
-    status: Literal["pending", "running", "completed", "failed", "cancelled"] | None = None,
+    status: Literal[
+        "pending",
+        "running",
+        "waiting_approval",
+        "completed",
+        "failed",
+        "cancelled",
+    ]
+    | None = None,
     page: int = 1,
     page_size: int = 20,
 ):

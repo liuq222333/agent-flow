@@ -5,11 +5,125 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.datastructures import Headers, UploadFile
 
+from app.api.v1 import secrets as secret_api
 from app.api.v1 import tools as tool_api
 from app.api.v1.knowledge import _normalize_knowledge_config, _validate_uploaded_file, rank_chunks
+from app.api.v1.schemas import CreateSecretRequest, UpdateSecretRequest
 from app.api.v1.secrets import decrypt_secret_value, encrypt_secret_value, sanitize_secret_row
 from app.api.v1.tools import mock_tool_test_result
 from app.main import app
+
+
+class _AsyncContext:
+    def __init__(self, value):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _ResultMappings:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def one(self):
+        return self.rows[0]
+
+    def one_or_none(self):
+        return self.rows[0] if self.rows else None
+
+    def __iter__(self):
+        return iter(self.rows)
+
+
+class _FakeResult:
+    def __init__(self, rows=None):
+        self.rows = rows or []
+
+    def mappings(self):
+        return _ResultMappings(self.rows)
+
+
+class _SecretApiConnection:
+    def __init__(self):
+        self.calls = []
+
+    async def execute(self, statement, params=None):
+        sql = str(statement)
+        params = params or {}
+        self.calls.append((sql, params))
+        if "INSERT INTO users" in sql:
+            return _FakeResult()
+        if "INSERT INTO secrets" in sql:
+            return _FakeResult(
+                [
+                    {
+                        "id": 1,
+                        "secret_key": params["secret_key"],
+                        "display_name": params["display_name"],
+                        "encrypted_value": params["encrypted_value"],
+                        "value": "raw-api-token",
+                        "status": "active",
+                        "key_version": 1,
+                        "created_at": "2026-05-19T00:00:00Z",
+                        "updated_at": "2026-05-19T00:00:00Z",
+                    }
+                ]
+            )
+        if "UPDATE secrets" in sql:
+            return _FakeResult(
+                [
+                    {
+                        "id": params["secret_id"],
+                        "secret_key": "openai_api_key",
+                        "display_name": params["display_name"],
+                        "encrypted_value": params["encrypted_value"],
+                        "value": "rotated-api-token",
+                        "status": "active",
+                        "key_version": 2,
+                        "created_at": "2026-05-19T00:00:00Z",
+                        "updated_at": "2026-05-19T00:01:00Z",
+                    }
+                ]
+            )
+        if "SELECT id, secret_key" in sql:
+            return _FakeResult(
+                [
+                    {
+                        "id": 1,
+                        "secret_key": "openai_api_key",
+                        "display_name": "OpenAI",
+                        "encrypted_value": "ciphertext",
+                        "value": "listed-api-token",
+                        "status": "active",
+                        "key_version": 2,
+                        "created_at": "2026-05-19T00:00:00Z",
+                        "updated_at": "2026-05-19T00:01:00Z",
+                    }
+                ]
+            )
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+    async def scalar(self, statement, params=None):
+        sql = str(statement)
+        self.calls.append((sql, params or {}))
+        if "SELECT count(*) FROM secrets" in sql:
+            return 1
+        raise AssertionError(f"unexpected scalar SQL: {sql}")
+
+
+class _SecretApiEngine:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def begin(self):
+        return _AsyncContext(self.conn)
+
+    def connect(self):
+        return _AsyncContext(self.conn)
 
 
 def test_management_routes_are_registered() -> None:
@@ -40,6 +154,48 @@ def test_secret_helpers_encrypt_and_hide_value() -> None:
     assert sanitize_secret_row(
         {"id": 1, "secret_key": "openai", "encrypted_value": encrypted, "value": "super-secret"}
     ) == {"id": 1, "secret_key": "openai"}
+
+
+@pytest.mark.asyncio
+async def test_secret_api_responses_and_audit_details_hide_plaintext(monkeypatch) -> None:
+    conn = _SecretApiConnection()
+    audit_details = []
+
+    async def fake_audit_log(conn, **kwargs):
+        audit_details.append(kwargs["detail"])
+
+    monkeypatch.setattr(secret_api, "engine", _SecretApiEngine(conn))
+    monkeypatch.setattr(secret_api, "write_audit_log", fake_audit_log)
+
+    created = await secret_api.create_secret(
+        CreateSecretRequest(
+            secret_key="openai_api_key",
+            display_name="OpenAI",
+            value="raw-api-token",
+        )
+    )
+    updated = await secret_api.update_secret(
+        1,
+        UpdateSecretRequest(display_name="OpenAI rotated", value="rotated-api-token"),
+    )
+    listed = await secret_api.list_secrets()
+
+    response_payloads = [created, updated, listed]
+    assert "raw-api-token" not in str(response_payloads)
+    assert "rotated-api-token" not in str(response_payloads)
+    assert "listed-api-token" not in str(response_payloads)
+    assert "encrypted_value" not in str(response_payloads)
+    assert "value" not in created
+    assert "value" not in updated
+    assert all("value" not in item for item in listed["items"])
+    assert "raw-api-token" not in str(conn.calls)
+    assert "rotated-api-token" not in str(conn.calls)
+    assert "raw-api-token" not in str(audit_details)
+    assert "rotated-api-token" not in str(audit_details)
+    assert audit_details == [
+        {"secret_key": "openai_api_key", "status": "active"},
+        {"secret_key": "openai_api_key", "status": "active", "rotated": True},
+    ]
 
 
 def test_tool_test_result_is_mock_only() -> None:

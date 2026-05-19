@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import {
   Bot,
   ChevronRight,
@@ -47,6 +47,7 @@ import {
   configString,
   copyText,
   formatDate,
+  formatRuntimeError,
   getRunId,
   isPlainObject,
   jsonText,
@@ -1019,7 +1020,7 @@ function mappingValueToText(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function asJsonObject(value?: JsonObject | null): JsonObject {
+function asJsonObject(value?: unknown): JsonObject {
   return isPlainObject(value) ? value : {};
 }
 
@@ -1042,6 +1043,97 @@ function renameObjectKey<T extends Record<string, unknown>>(target: T, oldKey: s
   return Object.fromEntries(
     Object.entries(target).map(([key, value]) => (key === oldKey ? [normalizedKey, value] : [key, value])),
   ) as T;
+}
+
+function JsonTextareaField({
+  label,
+  onChange,
+  value,
+}: {
+  label: string;
+  onChange: (value: unknown) => void;
+  value: unknown;
+}) {
+  const [draft, setDraft] = useState(jsonText(value ?? {}));
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraft(jsonText(value ?? {}));
+    setError(null);
+  }, [value]);
+
+  return (
+    <label>
+      <span>{label}</span>
+      <textarea
+        value={draft}
+        onChange={(event) => {
+          const nextDraft = event.target.value;
+          setDraft(nextDraft);
+          try {
+            onChange(JSON.parse(nextDraft) as unknown);
+            setError(null);
+          } catch {
+            setError("JSON 格式未生效");
+          }
+        }}
+        spellCheck={false}
+      />
+      {error ? <small className="error-text">{error}</small> : null}
+    </label>
+  );
+}
+
+function statusCodesText(value: unknown): string {
+  if (!Array.isArray(value)) {
+    return "";
+  }
+  return value.map((item) => String(item)).join(", ");
+}
+
+function StatusCodesField({
+  onChange,
+  value,
+}: {
+  onChange: (value: number[]) => void;
+  value: unknown;
+}) {
+  const [draft, setDraft] = useState(statusCodesText(value));
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraft(statusCodesText(value));
+    setError(null);
+  }, [value]);
+
+  return (
+    <label>
+      <span>success_status_codes</span>
+      <input
+        placeholder="200, 201, 204"
+        value={draft}
+        onBlur={() => {
+          const parsed = parseStatusCodes(draft);
+          const hasInvalid = draft
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean)
+            .some((item) => !/^\d+$/.test(item) || Number(item) < 100 || Number(item) > 599);
+          setError(hasInvalid ? "仅支持 100-599 的状态码" : null);
+          onChange(parsed);
+        }}
+        onChange={(event) => setDraft(event.target.value)}
+      />
+      {error ? <small className="error-text">{error}</small> : null}
+    </label>
+  );
+}
+
+function parseStatusCodes(value: string): number[] {
+  return value
+    .split(",")
+    .map((item) => Number(item.trim()))
+    .filter((item) => Number.isInteger(item) && item >= 100 && item <= 599);
 }
 
 export function VersionCodePanel({
@@ -1324,7 +1416,7 @@ export function TraceView({ trace, onSelectNode }: { trace: RunTrace; onSelectNo
         {trace.run.error_code ? (
           <div>
             <span>error</span>
-            <code>{trace.run.error_message ? `${trace.run.error_code}: ${trace.run.error_message}` : trace.run.error_code}</code>
+            <code>{formatRuntimeError(trace.run.error_code, trace.run.error_message)}</code>
           </div>
         ) : null}
       </section>
@@ -1366,7 +1458,13 @@ export function TraceView({ trace, onSelectNode }: { trace: RunTrace; onSelectNo
                 {node.error_code || node.error_message ? (
                   <label>
                     <span>error</span>
-                    <pre>{jsonText({ code: node.error_code, message: node.error_message })}</pre>
+                    <pre>
+                      {jsonText({
+                        code: node.error_code,
+                        message: node.error_message,
+                        hint: formatRuntimeError(node.error_code, node.error_message),
+                      })}
+                    </pre>
                   </label>
                 ) : null}
               </div>
@@ -1551,8 +1649,78 @@ export function StructuredNodeConfig({
     );
   }
 
+  if (node.type === "set_variable") {
+    const assignments = asJsonObject(config.assignments);
+    const updateAssignments = (nextAssignments: JsonObject) => onConfigChange({ assignments: nextAssignments });
+    const addAssignment = () => {
+      const key = makeUniqueKey(assignments, "variable");
+      updateAssignments({ ...assignments, [key]: "" });
+    };
+    const updateAssignmentTarget = (oldKey: string, nextKey: string) => {
+      updateAssignments(renameObjectKey(assignments, oldKey, nextKey));
+    };
+    const updateAssignmentValue = (key: string, value: string) => {
+      updateAssignments({ ...assignments, [key]: value });
+    };
+    const removeAssignment = (key: string) => {
+      const nextAssignments = { ...assignments };
+      delete nextAssignments[key];
+      updateAssignments(nextAssignments);
+    };
+
+    return (
+      <section className="structured-node-config">
+        <div className="node-subheading">
+          <SlidersHorizontal size={14} />
+          变量赋值
+        </div>
+        <div className="node-param-section compact">
+          <div className="node-param-heading">
+            <div>
+              <strong>assignments</strong>
+              <HelpCircle size={15} />
+            </div>
+            <button className="icon-only-button" onClick={addAssignment} title="添加变量" type="button">
+              <Plus size={18} />
+            </button>
+          </div>
+          <div className="node-param-grid set-variable-grid header-row">
+            <span>变量路径</span>
+            <span>值</span>
+          </div>
+          {Object.entries(assignments).map(([key, value]) => (
+            <div className="node-param-grid set-variable-grid" key={key}>
+              <input value={key} onChange={(event) => updateAssignmentTarget(key, event.target.value)} />
+              <input value={String(value ?? "")} onChange={(event) => updateAssignmentValue(key, event.target.value)} />
+              <button className="icon-only-button danger" onClick={() => removeAssignment(key)} title="删除变量" type="button">
+                <MinusCircle size={18} />
+              </button>
+            </div>
+          ))}
+          {Object.keys(assignments).length === 0 ? <p className="empty">暂无变量赋值</p> : null}
+        </div>
+      </section>
+    );
+  }
+
   if (node.type === "api") {
     const selectedToolId = String(config.tool_id ?? "");
+    const headers = asJsonObject(config.headers);
+    const queryParams = asJsonObject(config.query_params);
+    const updateHeaders = (nextHeaders: JsonObject) => onConfigChange({ headers: nextHeaders });
+    const updateQueryParams = (nextParams: JsonObject) => onConfigChange({ query_params: nextParams });
+    const addHeader = () => updateHeaders({ ...headers, [makeUniqueKey(headers, "header")]: "" });
+    const addQueryParam = () => updateQueryParams({ ...queryParams, [makeUniqueKey(queryParams, "param")]: "" });
+    const removeHeader = (key: string) => {
+      const nextHeaders = { ...headers };
+      delete nextHeaders[key];
+      updateHeaders(nextHeaders);
+    };
+    const removeQueryParam = (key: string) => {
+      const nextParams = { ...queryParams };
+      delete nextParams[key];
+      updateQueryParams(nextParams);
+    };
     return (
       <section className="structured-node-config">
         <div className="node-subheading">
@@ -1613,13 +1781,110 @@ export function StructuredNodeConfig({
         <label>
           <span>timeout_seconds</span>
           <input
-            min={1}
-            max={120}
+            min={0.1}
+            max={30}
+            step={0.1}
             type="number"
             value={configNumber(config, "timeout_seconds", configNumber(config, "timeout", 30))}
             onChange={(event) => onConfigChange({ timeout_seconds: Number(event.target.value) })}
           />
         </label>
+        <label>
+          <span>response_path</span>
+          <input
+            placeholder="data.result"
+            value={configString(config, "response_path", "")}
+            onChange={(event) => onConfigChange({ response_path: event.target.value })}
+          />
+        </label>
+        <label>
+          <span>max_response_bytes</span>
+          <input
+            min={1}
+            max={5242880}
+            type="number"
+            value={configNumber(config, "max_response_bytes", 1048576)}
+            onChange={(event) => onConfigChange({ max_response_bytes: Number(event.target.value) })}
+          />
+        </label>
+        <div className="inline-fields">
+          <label className="checkbox-row">
+            <input
+              checked={config.fail_on_http_error !== false}
+              type="checkbox"
+              onChange={(event) => onConfigChange({ fail_on_http_error: event.target.checked })}
+            />
+            <span>HTTP 错误时失败</span>
+          </label>
+          <label className="checkbox-row">
+            <input
+              checked={config.fail_on_request_error !== false}
+              type="checkbox"
+              onChange={(event) => onConfigChange({ fail_on_request_error: event.target.checked })}
+            />
+            <span>请求异常时失败</span>
+          </label>
+        </div>
+        <StatusCodesField
+          value={config.success_status_codes}
+          onChange={(value) => onConfigChange({ success_status_codes: value })}
+        />
+        <div className="node-param-section compact">
+          <div className="node-param-heading">
+            <div>
+              <strong>headers</strong>
+              <HelpCircle size={15} />
+            </div>
+            <button className="icon-only-button" onClick={addHeader} title="添加 Header" type="button">
+              <Plus size={18} />
+            </button>
+          </div>
+          <div className="node-param-grid set-variable-grid header-row">
+            <span>名称</span>
+            <span>值</span>
+          </div>
+          {Object.entries(headers).map(([key, value]) => (
+            <div className="node-param-grid set-variable-grid" key={key}>
+              <input value={key} onChange={(event) => updateHeaders(renameObjectKey(headers, key, event.target.value))} />
+              <input value={String(value ?? "")} onChange={(event) => updateHeaders({ ...headers, [key]: event.target.value })} />
+              <button className="icon-only-button danger" onClick={() => removeHeader(key)} title="删除 Header" type="button">
+                <MinusCircle size={18} />
+              </button>
+            </div>
+          ))}
+          {Object.keys(headers).length === 0 ? <p className="empty">暂无 Headers</p> : null}
+        </div>
+        <div className="node-param-section compact">
+          <div className="node-param-heading">
+            <div>
+              <strong>query_params</strong>
+              <HelpCircle size={15} />
+            </div>
+            <button className="icon-only-button" onClick={addQueryParam} title="添加 Query Param" type="button">
+              <Plus size={18} />
+            </button>
+          </div>
+          <div className="node-param-grid set-variable-grid header-row">
+            <span>名称</span>
+            <span>值</span>
+          </div>
+          {Object.entries(queryParams).map(([key, value]) => (
+            <div className="node-param-grid set-variable-grid" key={key}>
+              <input value={key} onChange={(event) => updateQueryParams(renameObjectKey(queryParams, key, event.target.value))} />
+              <input value={String(value ?? "")} onChange={(event) => updateQueryParams({ ...queryParams, [key]: event.target.value })} />
+              <button className="icon-only-button danger" onClick={() => removeQueryParam(key)} title="删除 Query Param" type="button">
+                <MinusCircle size={18} />
+              </button>
+            </div>
+          ))}
+          {Object.keys(queryParams).length === 0 ? <p className="empty">暂无 Query Params</p> : null}
+        </div>
+        <JsonTextareaField label="body JSON" value={config.body ?? {}} onChange={(value) => onConfigChange({ body: value })} />
+        <JsonTextareaField
+          label="mock_response JSON"
+          value={config.mock_response ?? { ok: true }}
+          onChange={(value) => onConfigChange({ mock_response: value })}
+        />
       </section>
     );
   }

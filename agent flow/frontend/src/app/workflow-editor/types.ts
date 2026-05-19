@@ -10,6 +10,7 @@ export type NodeType =
   | "knowledge_base"
   | "intent"
   | "branch"
+  | "set_variable"
   | "api"
   | "message"
   | "output"
@@ -123,6 +124,19 @@ export type OpsDeadJob = JsonObject & {
   error_message?: string | null;
   created_at?: string | null;
   failed_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type OpsFailedRun = JsonObject & {
+  run_id?: string | number;
+  id?: string | number;
+  workflow_id?: string | number;
+  workflow_version_id?: string | number;
+  version_id?: string | number;
+  status?: string;
+  error_code?: string | null;
+  error_message?: string | null;
+  created_at?: string | null;
   updated_at?: string | null;
 };
 

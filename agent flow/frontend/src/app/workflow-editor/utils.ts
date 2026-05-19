@@ -347,6 +347,34 @@ export function formatCodeStatus(status?: string | null, fallback = "-"): string
   return fallback;
 }
 
+export function formatRuntimeError(code?: string | null, message?: string | null): string {
+  if (!code) {
+    return message ?? "-";
+  }
+
+  const hints: Record<string, string> = {
+    model_api_key_missing: "模型 API Key 未配置，请检查环境变量或 Secret 引用。",
+    model_request_failed: "模型请求失败，请检查模型服务、网络或 provider 配置。",
+    model_response_invalid: "模型响应格式异常，请查看节点 trace 中的 provider/model 信息。",
+    model_timeout: "模型请求超时，请调大节点超时时间或稍后重试。",
+    workflow_code_missing: "本地 workflow.py 缺失，请重新发布或恢复生成代码。",
+    workflow_code_import_failed: "本地 workflow.py 导入失败，请检查语法和依赖。",
+    workflow_entrypoint_missing: "本地 workflow.py 缺少 async run(input_data, context) 入口。",
+    api_response_error: "API 节点响应不符合预期，请检查状态码、response_path 或响应体。",
+    api_request_error: "API 节点请求失败，请检查 URL、网络或外呼配置。",
+    response_too_large: "API 响应超过节点配置的大小限制，请调小响应或提高 max_response_bytes。",
+    network_error: "网络请求失败，请检查目标服务和网络连通性。",
+    rate_limit: "上游服务限流，请稍后重试或调整重试策略。",
+    timeout: "节点执行超时，请调大超时时间或检查外部服务。",
+  };
+
+  const hint = hints[code];
+  if (!hint) {
+    return message ? `${code}: ${message}` : code;
+  }
+  return message ? `${code}: ${hint} 原始信息：${message}` : `${code}: ${hint}`;
+}
+
 export async function copyText(value?: string | null): Promise<void> {
   if (!value || typeof navigator === "undefined" || !navigator.clipboard) {
     return;

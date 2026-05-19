@@ -41,13 +41,19 @@ $migrations = @(
   "002_observability_and_governance.sql",
   "003_generated_workflow_code.sql",
   "004_worker_heartbeat_and_runtime_indexes.sql",
-  "005_seed_deepseek_default_model.sql"
+  "005_seed_deepseek_default_model.sql",
+  "006_human_approval_tasks.sql"
 )
 
 foreach ($migration in $migrations) {
   $localMigration = Join-Path $root $migration
   if (-not (Test-Path $localMigration)) {
-    throw "Migration file not found: $localMigration"
+    $archivedMigration = Join-Path (Join-Path $root "开发文档\v0") $migration
+    if (Test-Path $archivedMigration) {
+      $localMigration = $archivedMigration
+    } else {
+      throw "Migration file not found: $localMigration"
+    }
   }
 
   $containerMigration = "/tmp/$migration"

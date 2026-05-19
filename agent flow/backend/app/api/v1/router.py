@@ -5,6 +5,7 @@ from fastapi import APIRouter, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import text
 
+from app.api.v1.human_approvals import router as human_approvals_router
 from app.api.v1.knowledge import router as knowledge_router
 from app.api.v1.models import router as models_router
 from app.api.v1.node_types import router as node_types_router
@@ -246,6 +247,7 @@ def _escape_metric_label(value: str) -> str:
 
 router.include_router(workflows_router)
 router.include_router(runs_router)
+router.include_router(human_approvals_router)
 router.include_router(knowledge_router)
 router.include_router(tools_router)
 router.include_router(models_router)

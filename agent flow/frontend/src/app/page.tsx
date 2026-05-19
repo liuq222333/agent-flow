@@ -89,6 +89,7 @@ import type {
   NodeEdgeAnchors,
   NodeType,
   OpsDeadJob,
+  OpsFailedRun,
   OpsQueue,
   OpsWorker,
   PendingConnection,
@@ -274,6 +275,7 @@ export default function Home() {
   const [opsQueues, setOpsQueues] = useState<OpsQueue[]>([]);
   const [opsWorkers, setOpsWorkers] = useState<OpsWorker[]>([]);
   const [opsDeadJobs, setOpsDeadJobs] = useState<OpsDeadJob[]>([]);
+  const [opsFailedRuns, setOpsFailedRuns] = useState<OpsFailedRun[]>([]);
   const [opsDeadCount, setOpsDeadCount] = useState(0);
   const [opsRecoverResult, setOpsRecoverResult] = useState<string | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
@@ -874,10 +876,11 @@ export default function Home() {
   const loadOps = useCallback(async () => {
     setBusyAction("ops");
     try {
-      const [queuesResponse, workersResponse, deadResponse] = await Promise.all([
+      const [queuesResponse, workersResponse, deadResponse, failedRunsResponse] = await Promise.all([
         fetchWithTimeout(`${apiBaseUrl}/ops/queues`, { cache: "no-store" }),
         fetchWithTimeout(`${apiBaseUrl}/ops/workers?active_seconds=600`, { cache: "no-store" }),
         fetchWithTimeout(`${apiBaseUrl}/ops/queues/workflow_runs/dead`, { cache: "no-store" }),
+        fetchWithTimeout(`${apiBaseUrl}/ops/workflow_runs/failed?limit=20`, { cache: "no-store" }),
       ]);
       if (!queuesResponse.ok) {
         throw new Error(`GET /ops/queues ${queuesResponse.status}`);
@@ -888,17 +891,23 @@ export default function Home() {
       if (!deadResponse.ok) {
         throw new Error(`GET /ops/queues/workflow_runs/dead ${deadResponse.status}`);
       }
+      if (!failedRunsResponse.ok) {
+        throw new Error(`GET /ops/workflow_runs/failed ${failedRunsResponse.status}`);
+      }
 
-      const [queuesData, workersData, deadData] = await Promise.all([
+      const [queuesData, workersData, deadData, failedRunsData] = await Promise.all([
         queuesResponse.json(),
         workersResponse.json(),
         deadResponse.json(),
+        failedRunsResponse.json(),
       ]);
       const deadJobs = extractItems<OpsDeadJob>(deadData, ["items", "jobs", "dead_jobs", "dead"]);
+      const failedRuns = extractItems<OpsFailedRun>(failedRunsData, ["items", "runs", "workflow_runs", "failed_runs"]);
       const queueItems = extractItems<OpsQueue>(queuesData, ["items", "queues"]);
       setOpsQueues(queueItems.length > 0 ? queueItems : ([queuesData] as OpsQueue[]));
       setOpsWorkers(extractItems<OpsWorker>(workersData, ["items", "workers"]));
       setOpsDeadJobs(deadJobs);
+      setOpsFailedRuns(failedRuns);
       setOpsDeadCount(
         extractNumber(deadData, ["count", "dead_count", "total"])
           ?? extractNumber(queuesData, ["dead_letter_depth"])
@@ -928,6 +937,29 @@ export default function Home() {
       await loadOps();
     } catch (error) {
       const message = error instanceof Error ? error.message : "恢复队列失败";
+      setOpsRecoverResult(message);
+      setStatusLine(message);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const recoverWorkflowRun = async (runId: string | number) => {
+    setBusyAction(`ops-recover-${runId}`);
+    try {
+      const response = await fetchWithTimeout(`${apiBaseUrl}/ops/workflow_runs/${runId}/recover`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(`POST /ops/workflow_runs/${runId}/recover ${response.status}`);
+      }
+      const rawResult = await response.text();
+      const data = rawResult ? (JSON.parse(rawResult) as unknown) : {};
+      setOpsRecoverResult(JSON.stringify(data ?? {}, null, 2));
+      setStatusLine(`workflow_run #${runId} 恢复完成`);
+      await loadOps();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `恢复 run #${runId} 失败`;
       setOpsRecoverResult(message);
       setStatusLine(message);
     } finally {
@@ -1844,7 +1876,7 @@ export default function Home() {
   };
 
   const pollRunUntilTerminal = async (runId: number) => {
-    const terminalStatuses = new Set(["completed", "failed", "cancelled"]);
+    const terminalStatuses = new Set(["completed", "failed", "cancelled", "waiting_approval"]);
     for (let attempt = 0; attempt < 60; attempt += 1) {
       const response = await fetchWithTimeout(`${apiBaseUrl}/runs/${runId}`, { cache: "no-store" });
       const run = await response.json();
@@ -3217,6 +3249,10 @@ export default function Home() {
                 <span>workflow_runs dead</span>
                 <strong>{opsDeadCount}</strong>
               </div>
+              <div>
+                <span>failed runs</span>
+                <strong>{opsFailedRuns.length}</strong>
+              </div>
             </section>
 
             <section className="admin-grid">
@@ -3296,6 +3332,61 @@ export default function Home() {
                   <p className="empty">暂无 worker 数据</p>
                 )}
               </section>
+            </section>
+
+            <section className="admin-panel">
+              <div className="section-heading">
+                <RotateCcw size={16} />
+                Failed workflow_runs
+              </div>
+              {opsFailedRuns.length > 0 ? (
+                <div className="data-table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Run</th>
+                        <th>Workflow</th>
+                        <th>Status</th>
+                        <th>Error</th>
+                        <th>Updated</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {opsFailedRuns.map((run, index) => {
+                        const runId = readText(run, ["run_id", "id"], `#${index + 1}`);
+                        const rawRunId = run.run_id ?? run.id ?? runId;
+                        return (
+                          <tr key={`${runId}-${index}`}>
+                            <td>{runId}</td>
+                            <td>
+                              {readText(run, ["workflow_id"])} / v
+                              {readText(run, ["workflow_version_id", "version_id"])}
+                            </td>
+                            <td>{readText(run, ["status"])}</td>
+                            <td title={readText(run, ["error_message"], "")}>
+                              {readText(run, ["error_code"], "unknown")}
+                            </td>
+                            <td>{formatDate((run.updated_at ?? run.created_at) as string | null | undefined)}</td>
+                            <td>
+                              <button
+                                className="text-button"
+                                disabled={busyAction !== null}
+                                onClick={() => void recoverWorkflowRun(rawRunId)}
+                                type="button"
+                              >
+                                恢复
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="empty">暂无 failed workflow_runs</p>
+              )}
             </section>
 
             <section className="admin-panel">

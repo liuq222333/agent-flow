@@ -665,7 +665,7 @@ async def cancel_run(run_id: int) -> dict[str, Any]:
                 SET status = 'cancelled',
                     ended_at = now(),
                     updated_at = now()
-                WHERE id = :run_id AND status IN ('pending', 'running')
+                WHERE id = :run_id AND status IN ('pending', 'running', 'waiting_approval')
                 RETURNING id, status
                 """
             ),

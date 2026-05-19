@@ -11,6 +11,7 @@ ALLOWED_NODE_TYPES = {
     "knowledge_base",
     "intent",
     "branch",
+    "set_variable",
     "api",
     "message",
     "output",
@@ -152,6 +153,10 @@ def validate_graph(graph: Graph, mode: ValidationMode) -> dict[str, Any]:
             )
         if mode in {"publish", "run"} and node_type == "llm":
             _validate_llm_node_config(node, path, errors)
+        if mode in {"publish", "run"} and node_type == "api":
+            _validate_api_node_config(node, path, errors)
+        if mode in {"publish", "run"} and node_type == "set_variable":
+            _validate_set_variable_node_config(node, path, errors)
 
     edge_ids: set[str] = set()
     outgoing: dict[str, list[str]] = defaultdict(list)
@@ -390,3 +395,121 @@ def _validate_llm_node_config(
                 node_id,
             )
         )
+
+
+def _validate_set_variable_node_config(
+    node: dict[str, Any],
+    path: str,
+    errors: list[dict[str, Any]],
+) -> None:
+    node_id = node.get("id")
+    config = node.get("config") if isinstance(node.get("config"), dict) else {}
+    assignments = config.get("assignments", config.get("variables"))
+    if assignments is None or assignments == "":
+        errors.append(
+            _issue(
+                "missing_set_variable_assignments",
+                "Set Variable Node 必须配置 assignments",
+                f"{path}.config.assignments",
+                node_id,
+            )
+        )
+        return
+    if isinstance(assignments, dict):
+        if not assignments:
+            errors.append(
+                _issue(
+                    "empty_set_variable_assignments",
+                    "Set Variable Node 至少需要一个赋值项",
+                    f"{path}.config.assignments",
+                    node_id,
+                )
+            )
+        return
+    if isinstance(assignments, list):
+        if not assignments:
+            errors.append(
+                _issue(
+                    "empty_set_variable_assignments",
+                    "Set Variable Node 至少需要一个赋值项",
+                    f"{path}.config.assignments",
+                    node_id,
+                )
+            )
+            return
+        for index, assignment in enumerate(assignments):
+            has_target = (
+                isinstance(assignment, dict)
+                and bool(assignment.get("target") or assignment.get("name"))
+            )
+            if not has_target:
+                errors.append(
+                    _issue(
+                        "invalid_set_variable_assignment",
+                        "Set Variable Node 赋值项必须包含 target 或 name",
+                        f"{path}.config.assignments[{index}]",
+                        node_id,
+                    )
+                )
+        return
+    errors.append(
+        _issue(
+            "invalid_set_variable_assignments",
+            "Set Variable Node assignments 必须是对象或数组",
+            f"{path}.config.assignments",
+            node_id,
+        )
+    )
+
+
+def _validate_api_node_config(
+    node: dict[str, Any],
+    path: str,
+    errors: list[dict[str, Any]],
+) -> None:
+    node_id = node.get("id")
+    config = node.get("config") if isinstance(node.get("config"), dict) else {}
+    mode = str(config.get("mode") or config.get("execution_mode") or "mock").lower()
+    if mode not in {"mock", "http"}:
+        errors.append(
+            _issue(
+                "invalid_api_mode",
+                "API Node mode 必须是 mock 或 http",
+                f"{path}.config.mode",
+                node_id,
+            )
+        )
+    if not str(config.get("url") or config.get("endpoint") or "").strip():
+        errors.append(
+            _issue(
+                "missing_api_url",
+                "API Node 必须配置 url",
+                f"{path}.config.url",
+                node_id,
+            )
+        )
+    method = str(config.get("method") or "GET").upper()
+    if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+        errors.append(
+            _issue(
+                "invalid_api_method",
+                "API Node method 必须是 GET、POST、PUT、PATCH 或 DELETE",
+                f"{path}.config.method",
+                node_id,
+            )
+        )
+    max_response_bytes = config.get("max_response_bytes")
+    if max_response_bytes is not None and max_response_bytes != "":
+        try:
+            parsed = int(max_response_bytes)
+        except (TypeError, ValueError):
+            parsed = 0
+        if parsed < 1 or parsed > 5 * 1024 * 1024:
+            errors.append(
+                _issue(
+                    "invalid_api_max_response_bytes",
+                    "API Node max_response_bytes 必须在 1 到 5242880 之间",
+                    f"{path}.config.max_response_bytes",
+                    node_id,
+                )
+            )

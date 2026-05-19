@@ -1,3 +1,6 @@
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from app.services import runtime
@@ -87,6 +90,38 @@ class _DeepSeekModelConfigConnection(_FakeConnection):
         return await super().execute(statement, params)
 
 
+class _FakeUsage:
+    def __init__(self, payload) -> None:
+        self.payload = payload
+
+    def model_dump(self):
+        return self.payload
+
+
+def _install_fake_openai(monkeypatch, create):
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            result = create(**kwargs)
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+
+    class _FakeAsyncOpenAI:
+        instances = []
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            self.chat = SimpleNamespace(completions=_FakeCompletions())
+            self.instances.append(self)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "openai",
+        SimpleNamespace(AsyncOpenAI=_FakeAsyncOpenAI),
+    )
+    return _FakeAsyncOpenAI
+
+
 def test_branch_selects_matching_condition_target() -> None:
     state = {
         "input": {"plan": "pro"},
@@ -157,6 +192,97 @@ async def test_branch_node_selects_matching_condition_target() -> None:
 
 
 @pytest.mark.asyncio
+async def test_set_variable_node_writes_resolved_values() -> None:
+    state = {
+        "input": {"user_query": "refund request", "customer": {"id": "c_001"}},
+        "variables": {"existing": "kept"},
+        "outputs": {"llm_1": {"answer": "approved"}},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "set_1",
+        "type": "set_variable",
+        "config": {
+            "assignments": {
+                "normalized.query": "{{input.user_query}}",
+                "variables.customer_id": "{{input.customer.id}}",
+                "answer": "{{outputs.llm_1.answer}}",
+            }
+        },
+    }
+    conn = _FakeConnection()
+
+    output = await runtime._execute_node_with_retry(conn, 100, node, state)
+
+    assert output == {
+        "values": {
+            "normalized.query": "refund request",
+            "customer_id": "c_001",
+            "answer": "approved",
+        },
+        "count": 3,
+    }
+    assert state["variables"]["existing"] == "kept"
+    assert state["variables"]["normalized"]["query"] == "refund request"
+    assert state["variables"]["customer_id"] == "c_001"
+    assert state["variables"]["answer"] == "approved"
+    node_run = next(iter(conn.node_runs.values()))
+    assert node_run["node_type"] == "set_variable"
+    assert node_run["output_json"] == output
+
+
+@pytest.mark.asyncio
+async def test_set_variable_node_supports_assignment_list() -> None:
+    state = {
+        "input": {"score": 9},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "set_1",
+        "type": "set_variable",
+        "config": {
+            "assignments": [
+                {"name": "score", "value": "{{input.score}}"},
+                {"target": "variables.status", "value": "ready"},
+            ]
+        },
+    }
+
+    output = await runtime._execute_node_with_retry(_FakeConnection(), 100, node, state)
+
+    assert output["count"] == 2
+    assert state["variables"] == {"score": 9, "status": "ready"}
+
+
+@pytest.mark.asyncio
+async def test_set_variable_node_rejects_invalid_assignment_target() -> None:
+    state = {
+        "input": {},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "set_1",
+        "type": "set_variable",
+        "config": {"assignments": [{"value": "missing target"}]},
+    }
+
+    with pytest.raises(runtime.RuntimeNodeError) as exc_info:
+        await runtime._execute_node_with_retry(_FakeConnection(), 100, node, state)
+
+    assert exc_info.value.error_code == "invalid_config"
+
+
+@pytest.mark.asyncio
 async def test_llm_node_can_bind_model_config_id() -> None:
     state = {
         "input": {"user_query": "hello"},
@@ -206,12 +332,170 @@ async def test_llm_node_supports_deepseek_model_config_without_key(monkeypatch) 
             "user_prompt": "问题：{{input.user_query}}",
         },
     }
+    conn = _DeepSeekModelConfigConnection()
 
     with pytest.raises(runtime.RuntimeNodeError) as exc_info:
-        await runtime._execute_node(_DeepSeekModelConfigConnection(), node, state, {})
+        await runtime._execute_node_with_retry(conn, 100, node, state)
 
-    assert exc_info.value.error_code == "permission_denied"
-    assert "provider=deepseek" in str(exc_info.value)
+    assert exc_info.value.error_code == "model_api_key_missing"
+    assert exc_info.value.error_detail["provider"] == "deepseek"
+    assert exc_info.value.error_detail["model"] == "deepseek-v4-flash"
+    assert exc_info.value.error_detail["model_config_id"] == 11
+    assert "deepseek_api_key" not in str(exc_info.value)
+    node_run = next(iter(conn.node_runs.values()))
+    assert node_run["error_code"] == "model_api_key_missing"
+    assert node_run["metadata_json"]["provider"] == "deepseek"
+    assert node_run["metadata_json"]["model"] == "deepseek-v4-flash"
+    assert node_run["metadata_json"]["model_config_id"] == 11
+    assert "deepseek_api_key" not in str(node_run)
+
+
+@pytest.mark.asyncio
+async def test_deepseek_llm_success_records_model_metadata_and_usage(monkeypatch) -> None:
+    async def fake_deepseek_key(conn, provider_config):
+        assert provider_config == {"api_key_secret": "deepseek_api_key"}
+        return "sk-test-secret"
+
+    def fake_create(**kwargs):
+        assert kwargs["model"] == "deepseek-v4-flash"
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="hello from deepseek",
+                        reasoning_content="brief reasoning",
+                    )
+                )
+            ],
+            usage=_FakeUsage(
+                {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12}
+            ),
+        )
+
+    monkeypatch.setattr(runtime, "resolve_deepseek_api_key", fake_deepseek_key)
+    fake_openai = _install_fake_openai(monkeypatch, fake_create)
+    state = {
+        "input": {"user_query": "hello"},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "llm_1",
+        "type": "llm",
+        "config": {
+            "model_config_id": 11,
+            "user_prompt": "问题：{{input.user_query}}",
+        },
+    }
+    conn = _DeepSeekModelConfigConnection()
+
+    output = await runtime._execute_node_with_retry(conn, 100, node, state)
+
+    assert fake_openai.instances[0].kwargs["base_url"] == "https://api.deepseek.com"
+    assert output["answer"] == "hello from deepseek"
+    assert output["provider"] == "deepseek"
+    assert output["model"] == "deepseek-v4-flash"
+    assert output["usage"] == {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12}
+    node_run = next(iter(conn.node_runs.values()))
+    assert node_run["metadata_json"]["provider"] == "deepseek"
+    assert node_run["metadata_json"]["model"] == "deepseek-v4-flash"
+    assert node_run["metadata_json"]["model_config_id"] == 11
+    assert node_run["metadata_json"]["duration_ms"] >= 0
+    assert node_run["metadata_json"]["token_usage"] == {
+        "prompt_tokens": 7,
+        "completion_tokens": 5,
+        "total_tokens": 12,
+    }
+    assert "sk-test-secret" not in str(output)
+    assert "sk-test-secret" not in str(node_run)
+
+
+@pytest.mark.asyncio
+async def test_deepseek_llm_request_error_uses_stable_code_and_redacts_key(monkeypatch) -> None:
+    async def fake_deepseek_key(conn, provider_config):
+        assert provider_config == {"api_key_secret": "deepseek_api_key"}
+        return "deepseek-secret-token"
+
+    def fake_create(**kwargs):
+        raise RuntimeError(
+            "upstream failed with deepseek-secret-token "
+            "Authorization: Bearer deepseek-secret-token"
+        )
+
+    monkeypatch.setattr(runtime, "resolve_deepseek_api_key", fake_deepseek_key)
+    _install_fake_openai(monkeypatch, fake_create)
+    state = {
+        "input": {"user_query": "hello"},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "llm_1",
+        "type": "llm",
+        "config": {
+            "model_config_id": 11,
+            "user_prompt": "问题：{{input.user_query}}",
+        },
+    }
+    conn = _DeepSeekModelConfigConnection()
+
+    with pytest.raises(runtime.RuntimeNodeError) as exc_info:
+        await runtime._execute_node_with_retry(conn, 100, node, state)
+
+    assert exc_info.value.error_code == "model_request_failed"
+    assert "deepseek-secret-token" not in str(exc_info.value)
+    node_run = next(iter(conn.node_runs.values()))
+    assert node_run["error_code"] == "model_request_failed"
+    assert node_run["metadata_json"]["provider"] == "deepseek"
+    assert node_run["metadata_json"]["model"] == "deepseek-v4-flash"
+    assert "deepseek-secret-token" not in str(node_run)
+
+
+@pytest.mark.asyncio
+async def test_deepseek_llm_invalid_response_uses_stable_code(monkeypatch) -> None:
+    async def fake_deepseek_key(conn, provider_config):
+        assert provider_config == {"api_key_secret": "deepseek_api_key"}
+        return "sk-test-secret"
+
+    def fake_create(**kwargs):
+        return SimpleNamespace(choices=[], usage=None)
+
+    monkeypatch.setattr(runtime, "resolve_deepseek_api_key", fake_deepseek_key)
+    _install_fake_openai(monkeypatch, fake_create)
+    state = {
+        "input": {"user_query": "hello"},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "llm_1",
+        "type": "llm",
+        "config": {
+            "model_config_id": 11,
+            "user_prompt": "问题：{{input.user_query}}",
+        },
+    }
+    conn = _DeepSeekModelConfigConnection()
+
+    with pytest.raises(runtime.RuntimeNodeError) as exc_info:
+        await runtime._execute_node_with_retry(conn, 100, node, state)
+
+    assert exc_info.value.error_code == "model_response_invalid"
+    assert exc_info.value.error_detail["provider"] == "deepseek"
+    node_run = next(iter(conn.node_runs.values()))
+    assert node_run["error_code"] == "model_response_invalid"
+    assert node_run["metadata_json"]["provider"] == "deepseek"
+    assert node_run["metadata_json"]["model"] == "deepseek-v4-flash"
+    assert "sk-test-secret" not in str(node_run)
 
 
 def test_branch_uses_default_when_no_condition_matches() -> None:
@@ -807,6 +1091,43 @@ async def test_node_timeout_records_stable_error_code(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_llm_node_timeout_records_model_timeout(monkeypatch) -> None:
+    state = {
+        "input": {},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "llm_1",
+        "type": "llm",
+        "timeout": 0.001,
+        "config": {"provider": "deepseek", "model": "deepseek-chat"},
+    }
+
+    async def slow_execute_node(conn, current_node, current_state, node_input):
+        await runtime.asyncio.sleep(0.05)
+        return {"answer": "too late"}
+
+    monkeypatch.setattr(runtime, "_execute_node", slow_execute_node)
+    conn = _FakeConnection()
+
+    with pytest.raises(runtime.RuntimeNodeError) as exc_info:
+        await runtime._execute_node_with_retry(conn, 100, node, state)
+
+    assert exc_info.value.error_code == "model_timeout"
+    assert exc_info.value.error_detail["provider"] == "deepseek"
+    assert exc_info.value.error_detail["model"] == "deepseek-chat"
+    node_run = next(iter(conn.node_runs.values()))
+    assert node_run["error_code"] == "model_timeout"
+    assert node_run["metadata_json"]["provider"] == "deepseek"
+    assert node_run["metadata_json"]["model"] == "deepseek-chat"
+    assert node_run["metadata_json"]["duration_ms"] >= 0
+
+
+@pytest.mark.asyncio
 async def test_missing_variable_fails_with_stable_error_code() -> None:
     state = {
         "input": {},
@@ -1018,3 +1339,71 @@ async def test_api_mock_response_path_and_query_params_are_resolved() -> None:
 
     assert output["response"] == {"ok": True}
     assert output["request"]["query_params"] == {"tenant": "acme"}
+    assert output["response_path"] == "data.result"
+    assert output["max_response_bytes"] == 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_api_mock_missing_response_path_raises_stable_error() -> None:
+    state = {
+        "input": {},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "api_1",
+        "type": "api",
+        "config": {
+            "mode": "mock",
+            "method": "GET",
+            "url": "https://api.example.test/orders",
+            "mock_response": {"data": {}},
+            "response_path": "data.missing",
+        },
+    }
+
+    with pytest.raises(runtime.RuntimeNodeError) as exc_info:
+        await runtime._execute_node(_FakeConnection(), node, state, {})
+
+    assert exc_info.value.error_code == "api_response_error"
+    assert exc_info.value.error_detail == {"response_path": "data.missing"}
+
+
+def test_api_decode_http_response_enforces_max_response_bytes() -> None:
+    response = runtime.httpx.Response(200, content=b"abcdef")
+
+    with pytest.raises(runtime.RuntimeNodeError) as exc_info:
+        runtime._decode_http_response(response, max_response_bytes=3)
+
+    assert exc_info.value.error_code == "response_too_large"
+    assert exc_info.value.error_detail["max_response_bytes"] == 3
+
+
+@pytest.mark.asyncio
+async def test_api_invalid_response_limit_raises_invalid_config() -> None:
+    state = {
+        "input": {},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "api_1",
+        "type": "api",
+        "config": {
+            "mode": "mock",
+            "method": "GET",
+            "url": "https://api.example.test/orders",
+            "max_response_bytes": "not-a-number",
+        },
+    }
+
+    with pytest.raises(runtime.RuntimeNodeError) as exc_info:
+        await runtime._execute_node(_FakeConnection(), node, state, {})
+
+    assert exc_info.value.error_code == "invalid_config"

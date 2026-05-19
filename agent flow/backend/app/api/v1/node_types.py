@@ -12,6 +12,7 @@ NODE_TYPE_ORDER = [
     "knowledge_base",
     "intent",
     "branch",
+    "set_variable",
     "api",
     "message",
     "output",
@@ -54,6 +55,12 @@ NODE_TYPE_SUMMARIES: dict[str, dict[str, str]] = {
         "name": "条件分支",
         "category": "control",
         "description": "根据条件选择下一条执行路径。",
+    },
+    "set_variable": {
+        "type": "set_variable",
+        "name": "变量赋值",
+        "category": "data",
+        "description": "将输入、模板或节点输出整理写入 variables。",
     },
     "api": {
         "type": "api",
@@ -244,13 +251,52 @@ CONFIG_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "object",
         "required": ["method", "url"],
         "properties": {
+            "mode": {"type": "string", "enum": ["mock", "http"], "default": "mock"},
             "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
             "url": {"type": "string"},
             "headers": {"type": "object", "additionalProperties": {"type": "string"}},
             "query_params": {"type": "object", "additionalProperties": True},
             "body": {},
+            "mock_response": {},
+            "mock_status_code": {"type": "integer", "minimum": 100, "maximum": 599},
             "response_path": {"type": "string"},
-            "timeout": {"type": "integer", "minimum": 1, "default": 30},
+            "timeout_seconds": {"type": "number", "minimum": 0.1, "maximum": 30, "default": 10},
+            "max_response_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5242880,
+                "default": 1048576,
+            },
+            "fail_on_http_error": {"type": "boolean", "default": True},
+            "fail_on_request_error": {"type": "boolean", "default": True},
+            "success_status_codes": {
+                "type": "array",
+                "items": {"type": "integer", "minimum": 100, "maximum": 599},
+            },
+        },
+    },
+    "set_variable": {
+        "type": "object",
+        "properties": {
+            "assignments": {
+                "oneOf": [
+                    {"type": "object", "additionalProperties": True},
+                    {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["value"],
+                            "properties": {
+                                "name": {"type": "string"},
+                                "target": {"type": "string"},
+                                "value": {},
+                            },
+                        },
+                    },
+                ],
+                "default": {},
+            },
+            "variables": {"type": "object", "additionalProperties": True},
         },
     },
     "message": {
@@ -300,12 +346,19 @@ FORM_SCHEMAS: dict[str, dict[str, Any]] = {
             ("config.fallback_intent", "兜底意图", "input", False),
         ],
         "branch": [("config.branches", "分支", "branch_array", True)],
+        "set_variable": [
+            ("config.assignments", "变量赋值", "key_value", True),
+        ],
         "api": [
+            ("config.mode", "Mode", "select", True),
             ("config.method", "Method", "select", True),
             ("config.url", "URL", "input", True),
             ("config.headers", "Headers", "key_value", False),
+            ("config.query_params", "Query Params", "key_value", False),
             ("config.body", "Body", "json", False),
-            ("config.timeout", "Timeout", "number", False),
+            ("config.response_path", "Response Path", "input", False),
+            ("config.timeout_seconds", "Timeout", "number", False),
+            ("config.max_response_bytes", "Max Response Bytes", "number", False),
         ],
         "message": [
             ("config.message_type", "消息类型", "select", True),

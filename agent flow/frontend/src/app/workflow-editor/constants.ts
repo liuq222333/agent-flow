@@ -13,6 +13,7 @@ import {
   MessageSquare,
   SquareTerminal,
   TextCursorInput,
+  Variable,
   Wrench,
 } from "lucide-react";
 
@@ -96,6 +97,18 @@ export const nodeCatalog: NodeCatalogItem[] = [
     },
   },
   { type: "branch", label: "条件分支", group: "控制流", Icon: GitBranch, config: { branches: [] } },
+  {
+    type: "set_variable",
+    label: "变量赋值",
+    group: "工具",
+    Icon: Variable,
+    config: {
+      assignments: {
+        normalized_query: "{{input.user_query}}",
+      },
+    },
+    output_mapping: { values: "variables.last_set_variables" },
+  },
   {
     type: "api",
     label: "调用 API",
