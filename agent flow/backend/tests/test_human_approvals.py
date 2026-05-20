@@ -4,7 +4,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app.api.v1.schemas import SubmitHumanApprovalRequest
+from app.api.v1.schemas import CancelHumanApprovalRequest, SubmitHumanApprovalRequest
 from app.main import app
 from app.services import human_approvals
 
@@ -86,6 +86,7 @@ def test_human_approval_routes_are_registered() -> None:
     assert "/api/v1/human-approval-tasks" in openapi["paths"]
     assert "/api/v1/human-approval-tasks/{task_id}" in openapi["paths"]
     assert "/api/v1/human-approval-tasks/{task_id}/submit" in openapi["paths"]
+    assert "/api/v1/human-approval-tasks/{task_id}/cancel" in openapi["paths"]
 
 
 class _ListTasksConnection:
@@ -232,6 +233,122 @@ async def test_submit_non_pending_human_approval_task_conflicts(monkeypatch) -> 
         await human_approvals.submit_human_approval_task(
             9,
             SubmitHumanApprovalRequest(decision="reject"),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "human_approval_task_not_pending"
+
+
+class _CancelTaskConnection:
+    def __init__(self, task: dict[str, Any], run_status: str = "waiting_approval") -> None:
+        self.task = task
+        self.response_json: dict[str, Any] | None = None
+        self.run_state_json: dict[str, Any] | None = None
+        self.run_metadata_json: dict[str, Any] | None = None
+        self.run = {
+            "id": task["run_id"],
+            "status": run_status,
+            "state_json": {
+                "input": {"amount": 100},
+                "variables": {},
+                "outputs": {},
+                "metadata": {
+                    "waiting_approval": {
+                        "task_id": task["id"],
+                        "node_id": task["node_id"],
+                        "next_node_id": "output_1",
+                    }
+                },
+                "path": ["start_1", task["node_id"]],
+                "final_output": {},
+            },
+            "metadata_json": {
+                "waiting_approval_task_id": task["id"],
+                "waiting_approval_node_id": task["node_id"],
+            },
+        }
+
+    async def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _FakeResult:
+        sql = str(statement)
+        params = params or {}
+        if "SELECT" in sql and "FROM human_approval_tasks" in sql and "FOR UPDATE" in sql:
+            return _FakeResult(row=self.task)
+        if "UPDATE human_approval_tasks" in sql:
+            self.response_json = params["response_json"]
+            updated = {
+                **self.task,
+                "status": params["status"],
+                "response_json": params["response_json"],
+                "decided_by": params["decided_by"],
+            }
+            return _FakeResult(row=updated)
+        if "SELECT" in sql and "FROM workflow_runs" in sql and "FOR UPDATE" in sql:
+            return _FakeResult(row=self.run)
+        if "UPDATE workflow_runs" in sql:
+            self.run_state_json = params["state_json"]
+            self.run_metadata_json = params["metadata_json"]
+            self.run["status"] = "cancelled"
+            self.run["state_json"] = params["state_json"]
+            self.run["metadata_json"] = params["metadata_json"]
+            return _FakeResult(row=self.run)
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+@pytest.mark.asyncio
+async def test_cancel_human_approval_task_marks_task_and_cancels_run(monkeypatch) -> None:
+    conn = _CancelTaskConnection(_approval_task())
+    audits: list[dict[str, Any]] = []
+
+    async def fake_audit_log(_conn: Any, **kwargs: Any) -> None:
+        audits.append(kwargs)
+
+    monkeypatch.setattr(human_approvals, "engine", _FakeEngine(conn))
+    monkeypatch.setattr(human_approvals, "write_audit_log", fake_audit_log)
+
+    result = await human_approvals.cancel_human_approval_task(
+        9,
+        CancelHumanApprovalRequest(reason="不再需要审批"),
+    )
+
+    assert result["status"] == "cancelled"
+    assert result["response_json"] == {
+        "status": "cancelled",
+        "reason": "不再需要审批",
+    }
+    assert result["run_cancelled"] is True
+    assert conn.run_state_json is not None
+    assert conn.run_state_json["outputs"]["approval_1"] == {
+        "status": "cancelled",
+        "task_id": 9,
+        "decision": None,
+        "approved": False,
+        "response": {},
+        "comment": "不再需要审批",
+        "reason": "不再需要审批",
+    }
+    assert "waiting_approval" not in conn.run_state_json["metadata"]
+    assert conn.run_state_json["metadata"]["cancelled_human_approval"] == {
+        "task_id": 9,
+        "node_id": "approval_1",
+        "reason": "不再需要审批",
+    }
+    assert conn.run_metadata_json == {
+        "cancelled_human_approval_task_id": 9,
+        "cancelled_human_approval_node_id": "approval_1",
+    }
+    assert audits[0]["action"] == "human_approval.cancel"
+    assert audits[0]["detail"]["run_cancelled"] is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_non_pending_human_approval_task_conflicts(monkeypatch) -> None:
+    conn = _CancelTaskConnection(_approval_task(status="cancelled"))
+    monkeypatch.setattr(human_approvals, "engine", _FakeEngine(conn))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await human_approvals.cancel_human_approval_task(
+            9,
+            CancelHumanApprovalRequest(),
         )
 
     assert exc_info.value.status_code == 409

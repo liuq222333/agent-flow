@@ -1078,9 +1078,16 @@ h1 {
 }
 
 .approval-card-header div {
+  flex: 1;
   display: grid;
   gap: 3px;
   min-width: 0;
+}
+
+.approval-card-header > input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
 }
 
 .approval-card-header strong,
@@ -1165,6 +1172,38 @@ h1 {
   font-weight: 800;
 }
 
+.approval-bulk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-muted);
+  padding: 10px 12px;
+}
+
+.approval-bulk-bar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.approval-bulk-bar input {
+  width: 16px;
+  height: 16px;
+}
+
+.approval-bulk-bar small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .approval-status {
   border-radius: 999px;
   background: var(--panel-muted);
@@ -1187,6 +1226,16 @@ h1 {
 .approval-status-rejected {
   background: #ffe4e6;
   color: #9f1239;
+}
+
+.approval-status-cancelled {
+  background: #e5e7eb;
+  color: #374151;
+}
+
+.approval-status-expired {
+  background: #ffedd5;
+  color: #9a3412;
 }
 
 .segmented-control {

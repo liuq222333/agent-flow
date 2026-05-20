@@ -5,12 +5,13 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.api.v1.schemas import SubmitHumanApprovalRequest
+from app.api.v1.schemas import CancelHumanApprovalRequest, SubmitHumanApprovalRequest
 from app.core.config import get_settings
 from app.infra.db.session import engine
 from app.services.audit import write_audit_log
 
 PENDING_STATUS = "pending"
+CANCELLED_STATUS = "cancelled"
 
 
 async def list_human_approval_tasks(
@@ -137,6 +138,71 @@ async def submit_human_approval_task(
     if resume_run_id is not None:
         await _enqueue_workflow_run(resume_run_id)
     return {**updated, "resume_supported": True, "resume_enqueued": resume_run_id is not None}
+
+
+async def cancel_human_approval_task(
+    task_id: int,
+    payload: CancelHumanApprovalRequest,
+) -> dict[str, Any]:
+    settings = get_settings()
+    response_json = {
+        "status": CANCELLED_STATUS,
+        "reason": payload.reason,
+    }
+    run_cancelled = False
+    async with engine.begin() as conn:
+        task = await _get_task_row_for_update(conn, task_id)
+        if task["status"] != PENDING_STATUS:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "human_approval_task_not_pending",
+                    "message": "human approval task is not pending",
+                    "status": task["status"],
+                },
+            )
+
+        result = await conn.execute(
+            _jsonb_stmt(
+                """
+                UPDATE human_approval_tasks
+                SET status = :status,
+                    response_json = :response_json,
+                    decided_by = :decided_by,
+                    decided_at = now(),
+                    updated_at = now()
+                WHERE id = :task_id
+                RETURNING *
+                """,
+                "response_json",
+            ),
+            {
+                "task_id": task_id,
+                "status": CANCELLED_STATUS,
+                "response_json": response_json,
+                "decided_by": settings.mock_user_id,
+            },
+        )
+        updated = dict(result.mappings().one())
+        run_cancelled = await _cancel_waiting_workflow_run(
+            conn,
+            task=updated,
+            cancellation_output=_cancelled_approval_output(updated, response_json),
+        )
+        await write_audit_log(
+            conn,
+            actor_user_id=settings.mock_user_id,
+            action="human_approval.cancel",
+            resource_type="human_approval_task",
+            resource_id=updated["id"],
+            detail={
+                "workflow_id": updated["workflow_id"],
+                "run_id": updated["run_id"],
+                "node_id": updated["node_id"],
+                "run_cancelled": run_cancelled,
+            },
+        )
+    return {**updated, "run_cancelled": run_cancelled}
 
 
 async def create_human_approval_task(
@@ -308,6 +374,82 @@ async def _resume_waiting_workflow_run(
     )
 
 
+async def _cancel_waiting_workflow_run(
+    conn: AsyncConnection,
+    *,
+    task: dict[str, Any],
+    cancellation_output: dict[str, Any],
+) -> bool:
+    result = await conn.execute(
+        text(
+            """
+            SELECT id, status, state_json, metadata_json
+            FROM workflow_runs
+            WHERE id = :run_id
+            FOR UPDATE
+            """
+        ),
+        {"run_id": task["run_id"]},
+    )
+    row = result.mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="workflow run not found")
+    run = dict(row)
+    if run["status"] != "waiting_approval":
+        return False
+
+    state_json = run.get("state_json")
+    state_payload = dict(state_json) if isinstance(state_json, dict) else {}
+    metadata = state_payload.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        state_payload["metadata"] = metadata
+    metadata.pop("waiting_approval", None)
+    metadata["cancelled_human_approval"] = {
+        "task_id": task["id"],
+        "node_id": task["node_id"],
+        "reason": cancellation_output["reason"],
+    }
+
+    outputs = state_payload.setdefault("outputs", {})
+    if not isinstance(outputs, dict):
+        outputs = {}
+        state_payload["outputs"] = outputs
+    outputs[task["node_id"]] = cancellation_output
+
+    run_metadata = dict(run.get("metadata_json") or {})
+    run_metadata.pop("waiting_approval_task_id", None)
+    run_metadata.pop("waiting_approval_node_id", None)
+    run_metadata.update(
+        {
+            "cancelled_human_approval_task_id": task["id"],
+            "cancelled_human_approval_node_id": task["node_id"],
+        }
+    )
+
+    await conn.execute(
+        _jsonb_stmt(
+            """
+            UPDATE workflow_runs
+            SET status = 'cancelled',
+                ended_at = now(),
+                state_json = :state_json,
+                metadata_json = :metadata_json,
+                updated_at = now()
+            WHERE id = :run_id
+            """,
+            "state_json",
+            "metadata_json",
+        ),
+        {
+            "run_id": task["run_id"],
+            "state_json": state_payload,
+            "metadata_json": run_metadata,
+        },
+    )
+    return True
+
+
 def _approval_output(task: dict[str, Any], response_json: dict[str, Any]) -> dict[str, Any]:
     decision = response_json["decision"]
     return {
@@ -317,6 +459,21 @@ def _approval_output(task: dict[str, Any], response_json: dict[str, Any]) -> dic
         "approved": decision == "approve",
         "response": response_json["response"],
         "comment": response_json["comment"],
+    }
+
+
+def _cancelled_approval_output(
+    task: dict[str, Any],
+    response_json: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "status": task["status"],
+        "task_id": task["id"],
+        "decision": None,
+        "approved": False,
+        "response": {},
+        "comment": response_json["reason"],
+        "reason": response_json["reason"],
     }
 
 

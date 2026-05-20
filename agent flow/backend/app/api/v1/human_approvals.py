@@ -2,7 +2,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Query
 
-from app.api.v1.schemas import SubmitHumanApprovalRequest
+from app.api.v1.schemas import CancelHumanApprovalRequest, SubmitHumanApprovalRequest
 from app.services import human_approvals as approval_service
 
 router = APIRouter(tags=["human-approvals"])
@@ -36,3 +36,14 @@ async def submit_human_approval_task(
     payload: SubmitHumanApprovalRequest,
 ):
     return await approval_service.submit_human_approval_task(task_id, payload)
+
+
+@router.post("/human-approval-tasks/{task_id}/cancel")
+async def cancel_human_approval_task(
+    task_id: int,
+    payload: CancelHumanApprovalRequest | None = None,
+):
+    return await approval_service.cancel_human_approval_task(
+        task_id,
+        payload or CancelHumanApprovalRequest(),
+    )

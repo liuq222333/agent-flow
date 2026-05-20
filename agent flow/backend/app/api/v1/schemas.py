@@ -98,6 +98,10 @@ class SubmitHumanApprovalRequest(BaseModel):
     comment: str | None = Field(default=None, max_length=1000)
 
 
+class CancelHumanApprovalRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=1000)
+
+
 class CreateKnowledgeBaseRequest(BaseModel):
     name: str
     description: str | None = None
