@@ -4,7 +4,7 @@
 
 第二阶段的核心目标不是重新设计系统，而是在当前 MVP 已跑通的基础上，把“前端创建工作流 → 后端发布生成本地代码 → 运行以本地代码为准 → 多工作流多版本稳定隔离”的模式做扎实，并补齐版本体验、运行排障、权限安全和 Runtime 可维护性。
 
-更新时间：2026-05-19
+更新时间：2026-05-20
 
 实现同步文档：
 
@@ -121,13 +121,13 @@ backend/generated_workflows/
 
 ```powershell
 cd "D:\xm\agent flow\agent flow"
-npm run check:local
-npm run smoke:e2e
+.\scripts\check-acceptance.ps1
+.\scripts\smoke-workflow-core.ps1
 ```
 
 当前已验证：
 
-- 后端测试通过，当前基线为 `129 passed`。
+- 后端测试通过，当前基线为 `141 passed`。
 - ruff 通过。
 - 前端 typecheck/lint 通过。
 - 前端生产构建通过。
@@ -336,8 +336,8 @@ Workflow 编辑器增加或优化：
 - UI 可看到 v1/v2 的 code metadata。
 - 手动修改 v1 `workflow.py` 后运行 v1，trace 显示 `code_modified=true`。
 - regenerate-code 不会在未确认时覆盖手改代码。
-- `npm run check:local` 通过。
-- `npm run smoke:e2e` 通过。
+- `.\scripts\check-acceptance.ps1` 通过。
+- `.\scripts\smoke-workflow-core.ps1` 通过。
 
 ---
 
@@ -562,7 +562,7 @@ set_variable
 
 当前已完成 Human Approval 的最小暂停/恢复契约：新增 `waiting_approval` run 状态、`human_approval_tasks` 表、审批任务查询、提交和取消 API，并已接入 Runtime pause/resume。当前运行面板已可在 run 进入 `waiting_approval` 时加载 pending 审批任务，并提交 approve/reject 或取消 pending 审批后刷新运行 trace。前端也已新增最小审批中心，可集中筛选和处理审批任务。
 
-下一步建议继续做审批体验打磨，而不是再改 Runtime 主链路。
+下一步不继续扩展审批体验，审批保持 MVP；开发重心回到普通 Agent 工作流主线：模板创建、发布生成本地代码、运行、Trace 和错误定位。
 
 原因：
 
@@ -698,8 +698,8 @@ human_approval
 ### 14.1 每轮必跑
 
 ```powershell
-npm run check:local
-npm run smoke:e2e
+.\scripts\check-acceptance.ps1
+.\scripts\smoke-workflow-core.ps1
 ```
 
 ### 14.2 Compose 验收

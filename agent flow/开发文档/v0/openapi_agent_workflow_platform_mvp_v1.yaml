@@ -849,6 +849,20 @@ paths:
         default:
           $ref: "#/components/responses/ErrorResponse"
 
+  /model-defaults:
+    get:
+      tags: [Models]
+      summary: Get default model settings
+      responses:
+        "200":
+          description: Default model settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelDefaults"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
   /model-configs:
     get:
       tags: [Models]
@@ -2327,12 +2341,80 @@ components:
           type: string
         provider_type:
           type: string
+        base_url:
+          type: string
+          nullable: true
         status:
           type: string
         config_json:
           allOf:
             - $ref: "#/components/schemas/JsonObject"
           description: Must include api_key_secret for providers that require an API key.
+        diagnostic:
+          $ref: "#/components/schemas/ModelProviderDiagnostic"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    ModelProviderDiagnostic:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ready, missing_api_key, disabled, not_required]
+        message:
+          type: string
+        requires_api_key:
+          type: boolean
+        api_key_available:
+          type: boolean
+        api_key_source:
+          type: string
+          enum: [env, secret, none, not_required]
+        api_key_env:
+          type: string
+          nullable: true
+        api_key_secret:
+          type: string
+          nullable: true
+        base_url_effective:
+          type: string
+          nullable: true
+
+    ModelDefaults:
+      type: object
+      properties:
+        default_provider:
+          type: string
+        deepseek:
+          $ref: "#/components/schemas/DeepSeekModelDefaults"
+
+    DeepSeekModelDefaults:
+      type: object
+      properties:
+        provider_name:
+          type: string
+          example: deepseek
+        provider_type:
+          type: string
+          example: deepseek
+        base_url:
+          type: string
+        api_key_secret:
+          type: string
+        model_name:
+          type: string
+          example: deepseek-v4-flash
+        model_type:
+          type: string
+          example: chat
+        display_name:
+          type: string
+        context_window:
+          type: integer
+        default_config:
+          $ref: "#/components/schemas/JsonObject"
 
     ModelConfig:
       type: object

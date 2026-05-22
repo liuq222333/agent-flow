@@ -72,6 +72,30 @@ def test_generate_workflow_code_does_not_overwrite_existing_version(tmp_path: Pa
         )
 
 
+def test_generate_workflow_code_creates_separate_version_dirs(tmp_path: Path) -> None:
+    graph = default_graph()
+    first = generate_workflow_code(
+        workflow_id=1,
+        version=1,
+        graph=graph,
+        graph_hash="graph-hash-v1",
+        generated_root=tmp_path,
+    )
+    second = generate_workflow_code(
+        workflow_id=1,
+        version=2,
+        graph=graph,
+        graph_hash="graph-hash-v2",
+        generated_root=tmp_path,
+    )
+
+    assert first.code_path.endswith("workflow_000001/v000001/workflow.py")
+    assert second.code_path.endswith("workflow_000001/v000002/workflow.py")
+    assert first.code_path != second.code_path
+    assert (tmp_path / "workflow_000001" / "v000001" / "workflow.py").exists()
+    assert (tmp_path / "workflow_000001" / "v000002" / "workflow.py").exists()
+
+
 def test_read_workflow_code_source_detects_hash_changes(tmp_path: Path) -> None:
     artifact = generate_workflow_code(
         workflow_id=1,

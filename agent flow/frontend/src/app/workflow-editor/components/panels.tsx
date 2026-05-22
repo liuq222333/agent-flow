@@ -79,6 +79,14 @@ type OutputSchemaItem = {
   description?: string;
 };
 
+type StartField = {
+  name: string;
+  type: string;
+  label: string;
+  required: boolean;
+  defaultValue: string;
+};
+
 export function AdminHeader({
   eyebrow,
   title,
@@ -144,6 +152,42 @@ export function DataTable({
   );
 }
 
+function formatRunStatusLabel(status: string) {
+  const normalized = normalizeStatus(status);
+  if (normalized === "success") {
+    return "成功";
+  }
+  if (normalized === "failed") {
+    return "失败";
+  }
+  if (normalized === "running") {
+    return "运行中";
+  }
+  if (status === "waiting_approval") {
+    return "待审批";
+  }
+  if (status === "cancelled") {
+    return "已取消";
+  }
+  return status || "-";
+}
+
+function formatRunDuration(startedAt?: string | null, endedAt?: string | null) {
+  if (!startedAt || !endedAt) {
+    return "-";
+  }
+  const started = new Date(startedAt).getTime();
+  const ended = new Date(endedAt).getTime();
+  if (!Number.isFinite(started) || !Number.isFinite(ended) || ended < started) {
+    return "-";
+  }
+  const durationMs = ended - started;
+  if (durationMs < 1000) {
+    return `${durationMs}ms`;
+  }
+  return `${(durationMs / 1000).toFixed(1)}s`;
+}
+
 export function ValidationView({
   validation,
   onSelectNode,
@@ -151,15 +195,21 @@ export function ValidationView({
   validation: ValidationResult;
   onSelectNode: (nodeId: string) => void;
 }) {
-  const issues = [...validation.errors, ...validation.warnings];
+  const issues = [
+    ...validation.errors.map((issue) => ({ ...issue, severity: "错误", tone: "error" as const })),
+    ...validation.warnings.map((issue) => ({ ...issue, severity: "警告", tone: "warning" as const })),
+  ];
   if (issues.length === 0) {
-    return <p className="success-text">valid</p>;
+    return <p className="success-text">校验通过</p>;
   }
   return (
     <ul className="issue-list">
       {issues.map((issue) => (
-        <li key={`${issue.code}-${issue.path}`}>
-          <strong>{issue.code}</strong>
+        <li className={`issue-${issue.tone}`} key={`${issue.code}-${issue.path}`}>
+          <div className="issue-heading">
+            <strong>{issue.severity}</strong>
+            <code>{issue.code}</code>
+          </div>
           <span>{issue.message}</span>
           <small>{issue.path}</small>
           {issue.node_id ? (
@@ -199,6 +249,7 @@ export function NodeConfigPanel({
   const catalogItem = nodeCatalog.find((item) => item.type === node.type);
   const NodeIcon = catalogItem?.Icon ?? Bot;
   const referenceGroups = buildReferenceGroups(graph, node.id);
+  const upstreamReferenceGroups = buildReferenceGroups(graph, node.id, { upstreamOnly: true });
   const inputMapping = asJsonObject(node.input_mapping);
   const outputMapping = asJsonObject(node.output_mapping);
   const outputSchema = getOutputSchema(node.config);
@@ -392,6 +443,16 @@ export function NodeConfigPanel({
     </details>
   );
 
+  if (node.type === "start") {
+    return (
+      <StartNodeEditor
+        node={node}
+        onNodePatch={onNodePatch}
+        protocolJsonSection={protocolJsonSection}
+      />
+    );
+  }
+
   if (node.type === "llm") {
     return (
       <LlmNodeEditor
@@ -402,6 +463,32 @@ export function NodeConfigPanel({
         onNodePatch={onNodePatch}
         outputSection={outputSection}
         protocolJsonSection={protocolJsonSection}
+      />
+    );
+  }
+
+  if (node.type === "output") {
+    return (
+      <FinalOutputNodeEditor
+        variant="output"
+        node={node}
+        onConfigChange={onConfigChange}
+        onNodePatch={onNodePatch}
+        protocolJsonSection={protocolJsonSection}
+        referenceGroups={upstreamReferenceGroups}
+      />
+    );
+  }
+
+  if (node.type === "end") {
+    return (
+      <FinalOutputNodeEditor
+        variant="end"
+        node={node}
+        onConfigChange={onConfigChange}
+        onNodePatch={onNodePatch}
+        protocolJsonSection={protocolJsonSection}
+        referenceGroups={upstreamReferenceGroups}
       />
     );
   }
@@ -447,6 +534,109 @@ export function NodeConfigPanel({
 
       {inputSection}
       {outputSection}
+      {protocolJsonSection}
+    </div>
+  );
+}
+
+function StartNodeEditor({
+  node,
+  onNodePatch,
+  protocolJsonSection,
+}: {
+  node: GraphNode;
+  onNodePatch: (patch: Partial<GraphNode>) => void;
+  protocolJsonSection: ReactNode;
+}) {
+  const fields = getStartFields(node.config);
+  const patchFields = (nextFields: StartField[]) => {
+    onNodePatch({
+      config: {
+        ...node.config,
+        fields: nextFields.map(({ defaultValue, ...field }) => ({
+          ...field,
+          ...(defaultValue.trim() ? { default: defaultValue } : {}),
+        })),
+      },
+    });
+  };
+  const addField = () => {
+    const nextName = makeUniqueKey(Object.fromEntries(fields.map((field) => [field.name, true])), "input");
+    patchFields([
+      ...fields,
+      { name: nextName, type: "string", label: nextName, required: false, defaultValue: "" },
+    ]);
+  };
+  const updateField = (index: number, patch: Partial<StartField>) => {
+    patchFields(fields.map((field, fieldIndex) => (fieldIndex === index ? { ...field, ...patch } : field)));
+  };
+  const removeField = (index: number) => {
+    patchFields(fields.filter((_, fieldIndex) => fieldIndex !== index));
+  };
+
+  return (
+    <div className="node-editor start-node-editor">
+      <header className="node-editor-header">
+        <div className="node-editor-icon node-start">
+          <Play size={18} />
+        </div>
+        <div>
+          <input
+            className="node-editor-title"
+            value={node.name}
+            onChange={(event) => onNodePatch({ name: event.target.value })}
+          />
+          <span>开始</span>
+        </div>
+      </header>
+
+      <p className="final-output-description">
+        声明工作流运行输入。后续节点可以引用系统输入或开始节点输出。
+      </p>
+
+      <section className="node-param-section">
+        <div className="node-param-heading">
+          <div>
+            <strong>输入</strong>
+            <HelpCircle size={15} />
+          </div>
+          <button className="icon-only-button" onClick={addField} title="添加输入字段" type="button">
+            <Plus size={18} />
+          </button>
+        </div>
+        <div className="node-param-grid start-field-grid header-row">
+          <span>字段名</span>
+          <span>类型</span>
+          <span>显示名</span>
+          <span>必填</span>
+        </div>
+        {fields.map((field, index) => (
+          <div className="node-param-grid start-field-grid" key={`${field.name}-${index}`}>
+            <input value={field.name} onChange={(event) => updateField(index, { name: event.target.value })} />
+            <select value={field.type} onChange={(event) => updateField(index, { type: event.target.value })}>
+              <option value="string">String</option>
+              <option value="number">Number</option>
+              <option value="boolean">Boolean</option>
+              <option value="array">Array</option>
+              <option value="object">Object</option>
+              <option value="json">JSON</option>
+            </select>
+            <input value={field.label} onChange={(event) => updateField(index, { label: event.target.value })} />
+            <label className="compact-checkbox">
+              <input
+                checked={field.required}
+                onChange={(event) => updateField(index, { required: event.target.checked })}
+                type="checkbox"
+              />
+            </label>
+            <button className="icon-only-button danger" onClick={() => removeField(index)} title="删除输入字段" type="button">
+              <MinusCircle size={18} />
+            </button>
+          </div>
+        ))}
+        {fields.length === 0 ? <p className="empty">暂无输入字段</p> : null}
+      </section>
+
       {protocolJsonSection}
     </div>
   );
@@ -649,6 +839,209 @@ function LlmNodeEditor({
   );
 }
 
+function FinalOutputNodeEditor({
+  variant,
+  node,
+  onConfigChange,
+  onNodePatch,
+  protocolJsonSection,
+  referenceGroups,
+}: {
+  variant: "output" | "end";
+  node: GraphNode;
+  onConfigChange: (patch: JsonObject) => void;
+  onNodePatch: (patch: Partial<GraphNode>) => void;
+  protocolJsonSection: ReactNode;
+  referenceGroups: ReferenceGroup[];
+}) {
+  const config = node.config ?? {};
+  const outputs = asJsonObject(config.outputs);
+  const valueKinds = getOutputValueKinds(config, outputs);
+  const responseMode = configString(config, "response_mode", "parameters") === "template" ? "template" : "parameters";
+  const template = configString(config, "template", "");
+  const rows = Object.keys(outputs).map((name) => ({
+    name,
+    kind: valueKinds[name] ?? inferInputKind(outputs[name]),
+    value: outputs[name],
+  }));
+
+  const patchOutputs = (nextOutputs: JsonObject, nextKinds: Record<string, InputValueKind>) => {
+    onNodePatch({
+      config: {
+        ...node.config,
+        outputs: nextOutputs,
+        output_value_kinds: nextKinds,
+      },
+    });
+  };
+
+  const addOutputParam = () => {
+    const key = makeUniqueKey(outputs, "output");
+    const kind: InputValueKind = "reference";
+    patchOutputs(
+      {
+        ...outputs,
+        [key]: getDefaultInputValue(kind, referenceGroups),
+      },
+      {
+        ...valueKinds,
+        [key]: kind,
+      },
+    );
+  };
+
+  const updateOutputName = (oldKey: string, nextKey: string) => {
+    patchOutputs(renameObjectKey(outputs, oldKey, nextKey), renameObjectKey(valueKinds, oldKey, nextKey));
+  };
+
+  const updateOutputKind = (key: string, kind: InputValueKind) => {
+    patchOutputs(
+      {
+        ...outputs,
+        [key]: getDefaultInputValue(kind, referenceGroups),
+      },
+      {
+        ...valueKinds,
+        [key]: kind,
+      },
+    );
+  };
+
+  const updateOutputValue = (key: string, kind: InputValueKind, rawValue: string) => {
+    patchOutputs(
+      {
+        ...outputs,
+        [key]: coerceInputValue(kind, rawValue),
+      },
+      {
+        ...valueKinds,
+        [key]: kind,
+      },
+    );
+  };
+
+  const removeOutputParam = (key: string) => {
+    const nextOutputs = { ...outputs };
+    const nextKinds = { ...valueKinds };
+    delete nextOutputs[key];
+    delete nextKinds[key];
+    patchOutputs(nextOutputs, nextKinds);
+  };
+
+  return (
+    <div className="node-editor final-output-editor">
+      <header className="node-editor-header">
+        <div className={`node-editor-icon node-${variant}`}>
+          {variant === "end" ? <X size={18} /> : <FileJson size={18} />}
+        </div>
+        <div>
+          <input
+            className="node-editor-title"
+            value={node.name}
+            onChange={(event) => onNodePatch({ name: event.target.value })}
+          />
+          <span>{variant === "end" ? "结束" : "最终输出（兼容）"}</span>
+        </div>
+      </header>
+
+      <p className="final-output-description">
+        {variant === "end"
+          ? "配置工作流运行完成后返回给调用方的最终结果。"
+          : "历史兼容节点：旧工作流仍可运行；新工作流建议直接在结束节点配置最终输出。"}
+      </p>
+
+      <section className="node-param-section">
+        <div className="node-param-heading">
+          <div>
+            <strong>回复模式</strong>
+          </div>
+        </div>
+        <div className="final-output-mode">
+          <label className={responseMode === "parameters" ? "active" : ""}>
+            <input
+              checked={responseMode === "parameters"}
+              name={`${node.id}-response-mode`}
+              onChange={() => onConfigChange({ response_mode: "parameters" })}
+              type="radio"
+            />
+            <span>直接返回参数值</span>
+          </label>
+          <label className={responseMode === "template" ? "active" : ""}>
+            <input
+              checked={responseMode === "template"}
+              name={`${node.id}-response-mode`}
+              onChange={() => onConfigChange({ response_mode: "template" })}
+              type="radio"
+            />
+            <span>按模板配置格式返回文本</span>
+          </label>
+        </div>
+      </section>
+
+      <section className="node-param-section">
+        <div className="node-param-heading">
+          <div>
+            <strong>输出</strong>
+            <HelpCircle size={15} />
+          </div>
+          <button className="icon-only-button" onClick={addOutputParam} title="添加输出参数" type="button">
+            <Plus size={18} />
+          </button>
+        </div>
+        <div className="node-param-grid final-output-grid header-row">
+          <span>参数名</span>
+          <span>类型</span>
+          <span>值</span>
+        </div>
+        {rows.map((row) => (
+          <div className="node-param-grid final-output-grid" key={row.name}>
+            <input value={row.name} onChange={(event) => updateOutputName(row.name, event.target.value)} />
+            <select value={row.kind} onChange={(event) => updateOutputKind(row.name, event.target.value as InputValueKind)}>
+              <option value="reference">引用</option>
+              <option value="text">文本</option>
+              <option value="number">数字</option>
+              <option value="boolean">布尔</option>
+              <option value="json">JSON</option>
+            </select>
+            {renderInputValueControl({
+              keyName: row.name,
+              kind: row.kind,
+              referenceGroups,
+              updateValue: updateOutputValue,
+              value: row.value,
+            })}
+            <button className="icon-only-button danger" onClick={() => removeOutputParam(row.name)} title="删除输出" type="button">
+              <MinusCircle size={18} />
+            </button>
+          </div>
+        ))}
+        {rows.length === 0 ? <p className="empty">暂无输出参数</p> : null}
+      </section>
+
+      {responseMode === "template" ? (
+        <section className="node-param-section final-output-template-section">
+          <div className="node-param-heading">
+            <div>
+              <strong>回复模板</strong>
+              <HelpCircle size={15} />
+            </div>
+          </div>
+          <label className="final-output-template">
+            <textarea
+              value={template}
+              onChange={(event) => onConfigChange({ template: event.target.value })}
+              placeholder="可以根据参数名定义返回格式，例如：今天 {{location}} 的温度为 {{temperature}}"
+            />
+            <small>{template.length}字</small>
+          </label>
+        </section>
+      ) : null}
+
+      {protocolJsonSection}
+    </div>
+  );
+}
+
 function renderInputValueControl({
   keyName,
   kind,
@@ -780,15 +1173,20 @@ function ReferencePicker({
   );
 }
 
-function buildReferenceGroups(graph: WorkflowGraph, currentNodeId: string): ReferenceGroup[] {
+function buildReferenceGroups(
+  graph: WorkflowGraph,
+  currentNodeId: string,
+  options?: { upstreamOnly?: boolean },
+): ReferenceGroup[] {
   const systemGroup: ReferenceGroup = {
     id: "system",
     label: "系统参数",
     Icon: Play,
     tone: "system",
     params: [
-      { label: "rawQuery", value: "{{input.user_query}}", valueType: "String" },
-      { label: "chatHistory", value: "{{messages}}", valueType: "Array<string>" },
+      { label: "rawQuery", value: "{{input.rawQuery}}", valueType: "String" },
+      { label: "user_query（兼容）", value: "{{input.user_query}}", valueType: "String" },
+      { label: "chatHistory", value: "{{input.chatHistory}}", valueType: "Array<string>" },
       { label: "fileUrls", value: "{{input.fileUrls}}", valueType: "Array<string>" },
       { label: "fileNames", value: "{{input.fileNames}}", valueType: "Array<string>" },
       { label: "end_user_id", value: "{{input.end_user_id}}", valueType: "String" },
@@ -798,8 +1196,22 @@ function buildReferenceGroups(graph: WorkflowGraph, currentNodeId: string): Refe
     ],
   };
 
+  const allowedNodeIds = options?.upstreamOnly ? collectUpstreamNodeIds(graph, currentNodeId) : null;
+  const variableParams = collectVariableReferences(graph, allowedNodeIds, currentNodeId);
+  const variableGroup: ReferenceGroup | null =
+    variableParams.length > 0
+      ? {
+          id: "variables",
+          label: "运行变量",
+          Icon: SlidersHorizontal,
+          tone: "set_variable",
+          params: variableParams,
+        }
+      : null;
+
   const nodeGroups = graph.nodes
     .filter((graphNode) => graphNode.id !== currentNodeId)
+    .filter((graphNode) => !allowedNodeIds || allowedNodeIds.has(graphNode.id))
     .map((graphNode) => {
       const catalogItem = nodeCatalog.find((item) => item.type === graphNode.type);
       return {
@@ -816,7 +1228,57 @@ function buildReferenceGroups(graph: WorkflowGraph, currentNodeId: string): Refe
     })
     .filter((group) => group.params.length > 0);
 
-  return [systemGroup, ...nodeGroups];
+  return [systemGroup, ...(variableGroup ? [variableGroup] : []), ...nodeGroups];
+}
+
+function collectUpstreamNodeIds(graph: WorkflowGraph, currentNodeId: string): Set<string> {
+  const incomingByTarget = new Map<string, string[]>();
+  graph.edges.forEach((edge) => {
+    if (!incomingByTarget.has(edge.target)) {
+      incomingByTarget.set(edge.target, []);
+    }
+    incomingByTarget.get(edge.target)?.push(edge.source);
+  });
+
+  const upstream = new Set<string>();
+  const queue = [...(incomingByTarget.get(currentNodeId) ?? [])];
+  while (queue.length > 0) {
+    const nodeId = queue.shift();
+    if (!nodeId || upstream.has(nodeId)) {
+      continue;
+    }
+    upstream.add(nodeId);
+    queue.push(...(incomingByTarget.get(nodeId) ?? []));
+  }
+  return upstream;
+}
+
+function collectVariableReferences(
+  graph: WorkflowGraph,
+  allowedNodeIds: Set<string> | null,
+  currentNodeId: string,
+): ReferenceParam[] {
+  const params = new Map<string, ReferenceParam>();
+  graph.nodes
+    .filter((node) => node.id !== currentNodeId)
+    .filter((node) => !allowedNodeIds || allowedNodeIds.has(node.id))
+    .forEach((node) => {
+      Object.values(asJsonObject(node.output_mapping)).forEach((destination) => {
+        if (typeof destination !== "string" || !destination.startsWith("variables.")) {
+          return;
+        }
+        const path = destination.slice("variables.".length);
+        if (!path || params.has(path)) {
+          return;
+        }
+        params.set(path, {
+          label: path,
+          value: `{{variables.${path}}}`,
+          valueType: "String",
+        });
+      });
+    });
+  return Array.from(params.values());
 }
 
 function findReferenceSelection(groups: ReferenceGroup[], value: string): { group: ReferenceGroup; param: ReferenceParam } | null {
@@ -834,6 +1296,10 @@ function unwrapReferenceToken(value: string): string {
 }
 
 function getNodeOutputFieldType(node: GraphNode, field: string): string {
+  if (node.type === "llm" && (field === "output" || field === "answer")) {
+    return "String";
+  }
+
   const schema = getOutputSchema(node.config);
   if (schema[field]?.type) {
     return toDisplayType(schema[field]?.type);
@@ -902,6 +1368,11 @@ function getNodeOutputFieldNames(node: GraphNode): string[] {
 
   Object.keys(asJsonObject(node.output_mapping)).forEach((key) => names.add(key));
 
+  if (node.type === "llm") {
+    names.add("output");
+    names.add("answer");
+  }
+
   const outputs = node.config.outputs;
   if (isPlainObject(outputs)) {
     Object.keys(outputs).forEach((key) => names.add(key));
@@ -923,6 +1394,28 @@ function getNodeOutputFieldNames(node: GraphNode): string[] {
   return Array.from(names);
 }
 
+function getStartFields(config: JsonObject): StartField[] {
+  const fields = config.fields;
+  if (!Array.isArray(fields)) {
+    return [];
+  }
+  return fields
+    .filter(isPlainObject)
+    .map((field) => ({
+      name: typeof field.name === "string" ? field.name : "",
+      type: typeof field.type === "string" ? field.type : "string",
+      label: typeof field.label === "string" ? field.label : typeof field.name === "string" ? field.name : "",
+      required: field.required === true,
+      defaultValue:
+        typeof field.default === "string"
+          ? field.default
+          : field.default === undefined
+            ? ""
+            : JSON.stringify(field.default),
+    }))
+    .filter((field) => field.name);
+}
+
 function getOutputRows(outputMapping: JsonObject, outputSchema: Record<string, OutputSchemaItem>) {
   const names = new Set([...Object.keys(outputMapping), ...Object.keys(outputSchema)]);
   return Array.from(names).map((name) => ({
@@ -930,6 +1423,25 @@ function getOutputRows(outputMapping: JsonObject, outputSchema: Record<string, O
     type: normalizeOutputType(outputSchema[name]?.type),
     description: outputSchema[name]?.description ?? mappingValueToText(outputMapping[name]),
   }));
+}
+
+function getOutputValueKinds(config: JsonObject, outputs: JsonObject): Record<string, InputValueKind> {
+  const kinds = asJsonObject(config.output_value_kinds);
+  return Object.fromEntries(
+    Object.keys(outputs).map((key) => {
+      const value = kinds[key];
+      if (
+        value === "reference" ||
+        value === "text" ||
+        value === "number" ||
+        value === "boolean" ||
+        value === "json"
+      ) {
+        return [key, value];
+      }
+      return [key, inferInputKind(outputs[key])];
+    }),
+  );
 }
 
 function getOutputSchema(config: JsonObject): Record<string, OutputSchemaItem> {
@@ -1023,6 +1535,59 @@ function mappingValueToText(value: unknown): string {
 
 function asJsonObject(value?: unknown): JsonObject {
   return isPlainObject(value) ? value : {};
+}
+
+function hasSecretPlaceholder(value: unknown): boolean {
+  if (typeof value === "string") {
+    return /\{\{\s*secrets\.[\w.-]+\s*\}\}/.test(value);
+  }
+  if (Array.isArray(value)) {
+    return value.some((item) => hasSecretPlaceholder(item));
+  }
+  if (isPlainObject(value)) {
+    return Object.values(value).some((item) => hasSecretPlaceholder(item));
+  }
+  return false;
+}
+
+function isSensitiveConfigKey(key: string): boolean {
+  return /(authorization|api[-_]?key|token|secret|password)/i.test(key);
+}
+
+function looksLikeInlineSecret(value: unknown): boolean {
+  if (typeof value !== "string" || hasSecretPlaceholder(value)) {
+    return false;
+  }
+  const trimmed = value.trim();
+  return /^(bearer|basic)\s+\S{8,}$/i.test(trimmed) || /^sk-[A-Za-z0-9_-]{8,}$/.test(trimmed);
+}
+
+function likelyBlockedApiUrl(url: string): string | null {
+  const trimmed = url.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return "HTTP 模式仅允许 http/https URL";
+    }
+    const hostname = parsed.hostname.toLowerCase();
+    if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname === "127.0.0.1" || hostname === "::1") {
+      return "运行时会阻断 localhost URL";
+    }
+    if (
+      hostname.startsWith("10.") ||
+      hostname.startsWith("192.168.") ||
+      hostname.startsWith("169.254.") ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname)
+    ) {
+      return "运行时会阻断 private/link-local URL";
+    }
+  } catch {
+    return "URL 格式不完整";
+  }
+  return null;
 }
 
 function makeUniqueKey(target: JsonObject, baseName: string): string {
@@ -1357,6 +1922,8 @@ export function RunHistoryView({
         if (runId === null) {
           return null;
         }
+        const normalizedStatus = normalizeStatus(run.status);
+        const duration = formatRunDuration(run.started_at, run.ended_at);
         return (
           <button
             key={runId}
@@ -1366,8 +1933,16 @@ export function RunHistoryView({
             type="button"
           >
             <span>#{runId}</span>
-            <strong>{run.status}</strong>
-            <small>{formatDate(run.created_at)}</small>
+            <strong
+              className={`status-${normalizedStatus}`}
+              title={run.error_code ? formatRuntimeError(run.error_code, run.error_message) : undefined}
+            >
+              {formatRunStatusLabel(run.status)}
+            </strong>
+            <small>
+              {formatDate(run.created_at)}
+              {duration !== "-" ? ` · ${duration}` : ""}
+            </small>
           </button>
         );
       })}
@@ -1379,56 +1954,71 @@ export function TraceView({ trace, onSelectNode }: { trace: RunTrace; onSelectNo
   const output = trace.run.output_json ? JSON.stringify(trace.run.output_json, null, 2) : "{}";
   const metadata = trace.run.metadata_json ?? {};
   const runId = getRunId(trace.run);
+  const runErrorHint = trace.run.error_code ? formatRuntimeError(trace.run.error_code, trace.run.error_message) : null;
+  const codeModifiedLabel =
+    metadata.code_modified === true ? "本地已修改" : metadata.code_modified === false ? "Hash 一致" : "未知";
   return (
     <div className="trace">
       <section className="trace-summary">
         <div>
-          <span>Run</span>
+          <span>运行</span>
           <strong>{runId ? `#${runId}` : "-"}</strong>
         </div>
         <div>
-          <span>Status</span>
-          <strong>{trace.run.status}</strong>
+          <span>状态</span>
+          <strong>{formatRunStatusLabel(trace.run.status)}</strong>
         </div>
         <div>
-          <span>Nodes</span>
+          <span>节点数</span>
           <strong>{trace.nodes.length}</strong>
         </div>
       </section>
+      {runErrorHint ? (
+        <section className="trace-alert">
+          <strong>运行失败</strong>
+          <span>{runErrorHint}</span>
+        </section>
+      ) : null}
       <section className="trace-code-metadata">
         <div>
-          <span>code_path_at_run</span>
+          <span>代码路径</span>
           <code>{metadataText(metadata.code_path_at_run)}</code>
         </div>
         <div>
-          <span>code_hash_at_run</span>
+          <span>运行 Hash</span>
           <code>{metadataText(metadata.code_hash_at_run)}</code>
         </div>
         <div>
-          <span>code_hash_published</span>
+          <span>发布 Hash</span>
           <code>{metadataText(metadata.code_hash_published)}</code>
         </div>
         <div>
-          <span>code_modified</span>
+          <span>本地改动</span>
           <strong className={metadata.code_modified === true ? "warning-text" : "success-text"}>
-            {metadata.code_modified === true ? "true" : metadata.code_modified === false ? "false" : "unknown"}
+            {codeModifiedLabel}
           </strong>
         </div>
         {trace.run.error_code ? (
           <div>
-            <span>error</span>
+            <span>错误</span>
             <code>{formatRuntimeError(trace.run.error_code, trace.run.error_message)}</code>
           </div>
         ) : null}
       </section>
-      <pre>{output}</pre>
+      <section className="trace-output-block">
+        <span>最终输出</span>
+        <pre>{output}</pre>
+      </section>
       <ol>
         {trace.nodes.map((node) => (
           <li key={node.id}>
             <details className={`trace-node trace-${normalizeStatus(node.status)}`}>
               <summary>
-                <strong>{node.node_name ?? node.node_id}</strong>
-                <span>{node.status}</span>
+                <div className="trace-node-title">
+                  <strong>{node.node_name ?? node.node_id}</strong>
+                  <small>{node.node_id} · {node.node_type}</small>
+                </div>
+                <span>{formatRunStatusLabel(node.status)}</span>
                 <small>{node.duration_ms ?? 0}ms</small>
                 <button
                   className="text-button"
@@ -1523,7 +2113,7 @@ export function StructuredNodeConfig({
         <label>
           <span>query template</span>
           <input
-            value={configString(config, "query", "{{input.user_query}}")}
+            value={configString(config, "query", "{{input.rawQuery}}")}
             onChange={(event) => onConfigChange({ query: event.target.value })}
           />
         </label>
@@ -1631,7 +2221,7 @@ export function StructuredNodeConfig({
         <label>
           <span>user_prompt</span>
           <textarea
-            value={configString(config, "user_prompt", "问题：{{input.user_query}}")}
+            value={configString(config, "user_prompt", "问题：{{query}}")}
             onChange={(event) => onConfigChange({ user_prompt: event.target.value })}
           />
         </label>
@@ -1740,11 +2330,24 @@ export function StructuredNodeConfig({
 
   if (node.type === "api") {
     const selectedToolId = String(config.tool_id ?? "");
+    const apiMode = configString(config, "mode", "mock");
+    const apiUrl = configString(config, "url", "");
     const headers = asJsonObject(config.headers);
     const queryParams = asJsonObject(config.query_params);
+    const blockedUrlHint = apiMode === "http" ? likelyBlockedApiUrl(apiUrl) : null;
+    const hasInlineSensitiveHeader = Object.entries(headers).some(
+      ([key, value]) => isSensitiveConfigKey(key) && looksLikeInlineSecret(value),
+    );
+    const hasSecretReference =
+      hasSecretPlaceholder(headers) ||
+      hasSecretPlaceholder(queryParams) ||
+      hasSecretPlaceholder(config.body) ||
+      hasSecretPlaceholder(config.mock_response);
     const updateHeaders = (nextHeaders: JsonObject) => onConfigChange({ headers: nextHeaders });
     const updateQueryParams = (nextParams: JsonObject) => onConfigChange({ query_params: nextParams });
     const addHeader = () => updateHeaders({ ...headers, [makeUniqueKey(headers, "header")]: "" });
+    const addBearerSecretHeader = () =>
+      updateHeaders({ ...headers, Authorization: "Bearer {{secrets.api_token}}" });
     const addQueryParam = () => updateQueryParams({ ...queryParams, [makeUniqueKey(queryParams, "param")]: "" });
     const removeHeader = (key: string) => {
       const nextHeaders = { ...headers };
@@ -1761,6 +2364,16 @@ export function StructuredNodeConfig({
         <div className="node-subheading">
           <Wrench size={14} />
           API 配置
+        </div>
+        <div className="node-param-section compact">
+          {apiMode === "http" && !apiUrl.trim() ? <small className="error-text">HTTP 模式需要填写 URL</small> : null}
+          {blockedUrlHint ? <small className="error-text">{blockedUrlHint}</small> : null}
+          {hasInlineSensitiveHeader ? (
+            <small className="warning-text">敏感 Header 建议使用 {"{{secrets.api_token}}"}，避免明文保存到配置。</small>
+          ) : null}
+          {hasSecretReference ? (
+            <small className="success-text">Secret 引用会在 Trace、日志和前端响应中显示为 ***。</small>
+          ) : null}
         </div>
         <label>
           <span>tool preset</span>
@@ -1785,7 +2398,7 @@ export function StructuredNodeConfig({
           <label>
             <span>mode</span>
             <select
-              value={configString(config, "mode", "mock")}
+              value={apiMode}
               onChange={(event) => onConfigChange({ mode: event.target.value })}
             >
               <option value="mock">mock</option>
@@ -1809,7 +2422,8 @@ export function StructuredNodeConfig({
         <label>
           <span>url</span>
           <input
-            value={configString(config, "url", "")}
+            placeholder="https://api.example.com/orders/{{input.order_id}}"
+            value={apiUrl}
             onChange={(event) => onConfigChange({ url: event.target.value })}
           />
         </label>
@@ -1870,9 +2484,14 @@ export function StructuredNodeConfig({
               <strong>headers</strong>
               <HelpCircle size={15} />
             </div>
-            <button className="icon-only-button" onClick={addHeader} title="添加 Header" type="button">
-              <Plus size={18} />
-            </button>
+            <div>
+              <button className="text-button" onClick={addBearerSecretHeader} title="添加 Bearer Secret Header" type="button">
+                Bearer Secret
+              </button>
+              <button className="icon-only-button" onClick={addHeader} title="添加 Header" type="button">
+                <Plus size={18} />
+              </button>
+            </div>
           </div>
           <div className="node-param-grid set-variable-grid header-row">
             <span>名称</span>
@@ -1880,8 +2499,16 @@ export function StructuredNodeConfig({
           </div>
           {Object.entries(headers).map(([key, value]) => (
             <div className="node-param-grid set-variable-grid" key={key}>
-              <input value={key} onChange={(event) => updateHeaders(renameObjectKey(headers, key, event.target.value))} />
-              <input value={String(value ?? "")} onChange={(event) => updateHeaders({ ...headers, [key]: event.target.value })} />
+              <input
+                placeholder="Authorization"
+                value={key}
+                onChange={(event) => updateHeaders(renameObjectKey(headers, key, event.target.value))}
+              />
+              <input
+                placeholder="Bearer {{secrets.api_token}}"
+                value={String(value ?? "")}
+                onChange={(event) => updateHeaders({ ...headers, [key]: event.target.value })}
+              />
               <button className="icon-only-button danger" onClick={() => removeHeader(key)} title="删除 Header" type="button">
                 <MinusCircle size={18} />
               </button>
@@ -1905,8 +2532,16 @@ export function StructuredNodeConfig({
           </div>
           {Object.entries(queryParams).map(([key, value]) => (
             <div className="node-param-grid set-variable-grid" key={key}>
-              <input value={key} onChange={(event) => updateQueryParams(renameObjectKey(queryParams, key, event.target.value))} />
-              <input value={String(value ?? "")} onChange={(event) => updateQueryParams({ ...queryParams, [key]: event.target.value })} />
+              <input
+                placeholder="tenant"
+                value={key}
+                onChange={(event) => updateQueryParams(renameObjectKey(queryParams, key, event.target.value))}
+              />
+              <input
+                placeholder="{{input.tenant}}"
+                value={String(value ?? "")}
+                onChange={(event) => updateQueryParams({ ...queryParams, [key]: event.target.value })}
+              />
               <button className="icon-only-button danger" onClick={() => removeQueryParam(key)} title="删除 Query Param" type="button">
                 <MinusCircle size={18} />
               </button>

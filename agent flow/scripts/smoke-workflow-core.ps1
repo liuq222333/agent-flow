@@ -1,14 +1,10 @@
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
-$script = Join-Path $PSScriptRoot "smoke_human_approval.py"
+$script = Join-Path $PSScriptRoot "smoke_workflow_core.py"
 $envFile = Join-Path $root ".env"
-$python = Join-Path $root "backend\.venv\Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
-  $python = "python"
-}
 
-if (-not $env:API_BASE_URL -and -not $env:AGENT_FLOW_BASE_URL -and -not $env:NEXT_PUBLIC_API_BASE_URL -and (Test-Path $envFile)) {
+if (-not $env:API_BASE_URL -and -not $env:NEXT_PUBLIC_API_BASE_URL -and (Test-Path $envFile)) {
   $apiBase = Select-String -Path $envFile -Pattern "^NEXT_PUBLIC_API_BASE_URL=(.+)$" | Select-Object -First 1
   if ($apiBase) {
     $env:API_BASE_URL = $apiBase.Matches[0].Groups[1].Value.Trim()
@@ -17,11 +13,10 @@ if (-not $env:API_BASE_URL -and -not $env:AGENT_FLOW_BASE_URL -and -not $env:NEX
 
 Push-Location $root
 try {
-  & $python $script @args
+  python $script
   if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
   }
-}
-finally {
+} finally {
   Pop-Location
 }

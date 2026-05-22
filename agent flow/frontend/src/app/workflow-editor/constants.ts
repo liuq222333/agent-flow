@@ -24,8 +24,18 @@ export const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localh
 
 export const emptyGraph: WorkflowGraph = { schema_version: "1.0", nodes: [], edges: [] };
 export const emptyFlowEdges: Edge[] = [];
-export const defaultRunInput = JSON.stringify({ user_query: "我想申请退款" }, null, 2);
+export const defaultRunInput = JSON.stringify({ rawQuery: "我想申请退款" }, null, 2);
 export const nodeDropMoveThreshold = 8;
+export const defaultStartFields = [
+  { name: "rawQuery", type: "string", label: "用户输入", required: true },
+  { name: "chatHistory", type: "array", label: "历史消息", required: false },
+  { name: "fileUrls", type: "array", label: "文件 URL", required: false },
+  { name: "fileNames", type: "array", label: "文件名", required: false },
+  { name: "end_user_id", type: "string", label: "终端用户 ID", required: false },
+  { name: "conversation_id", type: "string", label: "会话 ID", required: false },
+  { name: "request_id", type: "string", label: "请求 ID", required: false },
+  { name: "fields", type: "array", label: "扩展字段", required: false },
+];
 export const defaultKnowledgeForm = {
   name: "",
   description: "",
@@ -37,30 +47,32 @@ export const defaultKnowledgeForm = {
 };
 
 export const nodeCatalog: NodeCatalogItem[] = [
-  { type: "start", label: "开始", group: "输入输出", Icon: CircleStop, config: {} },
+  { type: "start", label: "开始", group: "输入输出", Icon: CircleStop, config: { fields: defaultStartFields } },
   {
     type: "input",
     label: "用户输入",
-    group: "输入输出",
+    group: "兼容节点",
     Icon: TextCursorInput,
     config: {
       fields: [{ name: "user_query", type: "string", label: "用户问题", required: true }],
     },
     output_mapping: { user_query: "variables.user_query" },
+    hidden: true,
   },
   {
     type: "llm",
-    label: "生成回答",
+    label: "大模型",
     group: "AI",
     Icon: Bot,
     config: {
       provider: "deepseek",
       model: "deepseek-v4-flash",
       system_prompt: "你是一个严谨、清晰的 AI 助手。",
-      user_prompt: "问题：{{input.user_query}}",
+      user_prompt: "问题：{{query}}",
       temperature: 0.3,
     },
-    output_mapping: { answer: "variables.answer" },
+    input_mapping: { query: "{{input.rawQuery}}" },
+    output_mapping: { output: "variables.output", answer: "variables.answer" },
   },
   {
     type: "knowledge_base",
@@ -75,7 +87,7 @@ export const nodeCatalog: NodeCatalogItem[] = [
       score_threshold: 0.65,
       context_budget_tokens: 3000,
     },
-    input_mapping: { question: "{{input.user_query}}" },
+    input_mapping: { question: "{{input.rawQuery}}" },
     output_mapping: { chunks: "variables.kb_context" },
   },
   {
@@ -91,7 +103,7 @@ export const nodeCatalog: NodeCatalogItem[] = [
       ],
       fallback_intent: "general_question",
     },
-    input_mapping: { text: "{{input.user_query}}" },
+    input_mapping: { text: "{{input.rawQuery}}" },
     output_mapping: {
       intent: "variables.intent_result.intent",
       confidence: "variables.intent_result.confidence",
@@ -116,7 +128,7 @@ export const nodeCatalog: NodeCatalogItem[] = [
     Icon: Variable,
     config: {
       assignments: {
-        normalized_query: "{{input.user_query}}",
+        normalized_query: "{{input.rawQuery}}",
       },
     },
     output_mapping: { values: "variables.last_set_variables" },
@@ -142,18 +154,35 @@ export const nodeCatalog: NodeCatalogItem[] = [
     label: "回复消息",
     group: "消息",
     Icon: MessageSquare,
-    config: { message_type: "text", template: "{{variables.answer}}" },
-    input_mapping: { answer: "{{variables.answer}}" },
+    config: { message_type: "text", template: "{{variables.output}}" },
+    input_mapping: { output: "{{variables.output}}" },
     output_mapping: { message: "messages" },
   },
   {
     type: "output",
     label: "最终输出",
-    group: "输入输出",
+    group: "兼容节点",
     Icon: LogOut,
-    config: { outputs: { answer: "{{variables.answer}}" } },
+    config: {
+      response_mode: "parameters",
+      outputs: { answer: "{{variables.answer}}" },
+      output_value_kinds: { answer: "reference" },
+      template: "",
+    },
+    hidden: true,
   },
-  { type: "end", label: "结束", group: "输入输出", Icon: CheckCircle2, config: {} },
+  {
+    type: "end",
+    label: "结束",
+    group: "输入输出",
+    Icon: CheckCircle2,
+    config: {
+      response_mode: "parameters",
+      outputs: { output: "" },
+      output_value_kinds: { output: "reference" },
+      template: "",
+    },
+  },
 ];
 
 export const nodeJsonFieldLabels: Record<JsonNodeField, string> = {

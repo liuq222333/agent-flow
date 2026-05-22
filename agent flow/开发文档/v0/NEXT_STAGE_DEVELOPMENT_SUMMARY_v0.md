@@ -22,7 +22,7 @@
 - DeepSeek 默认模型已接入，默认 `provider=deepseek`、`model=deepseek-v4-flash`。
 - Ops 已支持 workflow/document worker heartbeat、workflow run 队列深度、dead-letter 查看和恢复。
 - 前端已有 Workflow / Knowledge / Tools / Secrets / Models / Ops 六个入口。
-- 本地 `npm run check:local`、`npm run smoke:e2e` 已作为主要回归验收入口。
+- 本地 `.\scripts\check-acceptance.ps1`、`.\scripts\smoke-e2e.ps1` 已作为主要回归验收入口。
 
 当前生产化边界：
 
@@ -60,8 +60,8 @@
 ```powershell
 cd "D:\xm\agent flow\agent flow"
 npm run compose:up
-npm run check:local
-npm run smoke:e2e
+.\scripts\check-acceptance.ps1
+.\scripts\smoke-e2e.ps1
 ```
 
 ---
@@ -289,15 +289,15 @@ hash 不一致时：
 
 - 保持 `backend/generated_workflows/` 和 `frontend/tsconfig.tsbuildinfo` 不再进入 Git。
 - 明确 `开发文档/v0` 是当前设计文档归档目录。
-- 保持 `npm run check:local` 与 `npm run smoke:e2e` 每轮通过。
+- 保持 `.\scripts\check-acceptance.ps1` 与 `.\scripts\smoke-e2e.ps1` 每轮通过。
 - 更新 README / OPERATIONS / OpenAPI 与真实实现保持同步。
 - 对本地 `.env` 与 `.env.example` 差异建立说明。
 
 验收：
 
 ```powershell
-npm run check:local
-npm run smoke:e2e
+.\scripts\check-acceptance.ps1
+.\scripts\smoke-e2e.ps1
 docker compose ps
 Invoke-RestMethod http://localhost:8000/api/v1/ready
 Invoke-RestMethod http://localhost:8000/api/v1/ops/workers
@@ -507,8 +507,8 @@ document worker 当前已有 heartbeat，但文档任务仍是 DB polling 模式
 ### 基础验收
 
 ```powershell
-npm run check:local
-npm run smoke:e2e
+.\scripts\check-acceptance.ps1
+.\scripts\smoke-e2e.ps1
 docker compose ps
 Invoke-RestMethod http://localhost:8000/api/v1/ready
 Invoke-RestMethod http://localhost:8000/api/v1/ops/queues

@@ -428,7 +428,7 @@ set_variable
 ```json
 {
   "assignments": {
-    "normalized_query": "{{input.user_query}}",
+    "normalized_query": "{{input.rawQuery}}",
     "customer.id": "{{input.customer_id}}"
   }
 }
@@ -441,11 +441,31 @@ set_variable
 - 支持对象和数组两种配置形式。
 - 不引入等待态和数据库迁移。
 
+### 9.3.1 三段式最终输出增强
+
+当前主线已调整为 `开始 -> 大模型/业务节点 -> 结束`。最终返回由 `end` 节点负责；历史 `output` 节点保留兼容，不再作为新工作流主线推荐。
+
+`start` 节点配置面板需要支持：
+
+- 声明运行输入字段，默认包含 `rawQuery/chatHistory/fileUrls/fileNames/end_user_id/conversation_id/request_id/fields`。
+- 运行时把配置字段输出到 `state.outputs[start_node_id]`，后续节点可引用 `{{outputs.start_1.rawQuery}}`。
+
+`llm` 节点需要支持：
+
+- 默认通过 `input_mapping.query = "{{input.rawQuery}}"` 读取开始输入。
+- runtime output 以 `output` 为主字段，同时保留 `answer` 兼容旧工作流。
+
+`end` 节点配置面板需要支持：
+
+- 直接返回参数对象：从前面节点输出、运行变量、输入或消息中选择字段。
+- 模板返回文本：先定义输出参数，再用 `{{参数名}}` 渲染最终文本。
+- 旧 `output.config.outputs` 仍按直接返回参数对象执行，保证历史工作流可运行。
+
 ### 9.4 推荐下一类增强节点
 
 当前已完成 Human Approval 的最小暂停/恢复契约：新增 `waiting_approval` run 状态、`human_approval_tasks` 表、审批任务查询、提交和取消 API，并已接入 Runtime pause/resume。当前运行面板已补齐最小审批操作 UI，用户可以不离开工作流编辑页完成 approve/reject 或取消 pending 审批。前端也已新增最小 `Approvals` 审批中心，支持按状态集中查看和处理任务，并可选择多个 pending 任务批量同意、拒绝或取消。
 
-它还不是完整审批产品，权限控制和超时过期等能力仍在后续范围；当前取消能力只覆盖人工主动取消 pending 审批的最小闭环。
+它还不是完整审批产品，权限控制和超时过期等能力仍在后续范围；当前取消能力只覆盖人工主动取消 pending 审批的最小闭环。本阶段后续暂停扩展审批旁支，主线回到普通 Agent 工作流：模板创建、发布生成本地代码、运行、Trace 和错误排障。
 
 节点类型：
 
@@ -476,7 +496,7 @@ human_approval
 
 ### 9.5 最小实现建议
 
-如果本阶段时间有限，`Human Approval Node` 可以先保持当前暂停/恢复和运行面板审批能力，不强行实现完整审批中心 UI。
+本阶段后续 `Human Approval Node` 保持当前 MVP 能力，不继续扩展权限、多人审批、超时通知等旁支功能。
 
 若要实现最小可用版本，建议范围：
 
@@ -525,8 +545,14 @@ P2。
 每轮开发结束至少运行：
 
 ```powershell
-npm run check:local
-npm run smoke:e2e
+.\scripts\check-acceptance.ps1
+.\scripts\smoke-workflow-core.ps1
+```
+
+工作流主线改动可优先运行更小的核心 Smoke：
+
+```powershell
+.\scripts\smoke-workflow-core.ps1
 ```
 
 如果只改后端，可运行后端单测。
@@ -544,6 +570,10 @@ npm run smoke:e2e
 - Ops 恢复。
 - Secret 脱敏。
 - DeepSeek mock 调用。
+- 核心工作流 Smoke 覆盖：
+  - Mock LLM 工作流发布、读取 `workflow.py`、同步运行和 Trace code metadata。
+  - Intent + Branch 模板发布运行。
+  - API + Message 模板发布运行和 Secret 脱敏。
 
 ### 10.4 前端测试范围
 
@@ -802,7 +832,7 @@ P1。
 
 ## 16. 当前实现同步状态
 
-截至 2026-05-19，第二阶段已有一轮实现落地，详细接口和错误码契约见：
+截至 2026-05-20，第二阶段主线增强已有新一轮实现落地，详细接口和错误码契约见：
 
 ```text
 开发文档/v1/SECOND_STAGE_CONTRACT_SYNC_v1.md
@@ -812,14 +842,22 @@ P1。
 
 | 需求 | 状态 | 说明 |
 | --- | --- | --- |
-| R1：版本与代码产物体验 | 部分完成 | 已有版本代码面板、code metadata、Trace code 信息，后续继续做 UI 细节验收 |
+| R1：版本与代码产物体验 | 已完成主线增强 | 版本区域改为代码产物状态，原始 path/hash 放入调试详情；Run 面板显示运行版本、本地代码状态、hash 和本地改动提示；Trace 展示中文 code metadata 与错误提示 |
 | R2：Runtime 模块拆分 | 已完成第一轮 | generated workflow 加载逻辑已拆到 `backend/app/services/generated_runtime.py` |
 | R3：Ops 与运行恢复 UI | 已完成第一轮 | 已支持 failed runs 列表、dead queue、单条恢复和队列恢复 |
 | R4：权限与安全最小闭环 | 已完成第一轮 | Secret 响应脱敏、审计 detail 脱敏、generated workflow 路径越界测试已补齐 |
 | R5：DeepSeek 模型产品化 | 已完成第一轮 | 稳定错误码、模型 metadata、token usage、错误脱敏已补齐 |
-| R6：新增节点能力与节点协议 | 已完成第四轮 | 已新增 `set_variable` 节点，补齐 API Node 小步生产化配置，并新增 Human Approval 最小暂停/恢复契约 |
-| R7：测试与验收体系 | 已更新基线 | 后端 `129 passed`，前端 lint/typecheck/build 通过 |
-| R8：文档和接口契约同步 | 进行中 | 本次新增实现同步文档，后续还需更新 OpenAPI/API 设计文档 |
+| R6：新增节点能力与节点协议 | 已完成 MVP，暂停审批扩展 | 已新增 `set_variable` 节点、API Node 小步生产化配置、Human Approval 最小暂停/恢复契约；本轮不继续扩展审批权限、超时和通知 |
+| R7：测试与验收体系 | 已补主线 Smoke | 新增 `scripts/smoke-workflow-core.ps1`，覆盖 Mock LLM、Intent Branch、API Message、生成代码读取和 Trace code metadata |
+| R8：文档和接口契约同步 | 已同步本轮主线 | 本文档和实现同步文档已标记审批暂停扩展、主线验收和核心 Smoke；OpenAPI v0 已包含 generated workflow 字段与错误码 |
+
+本轮新增主线验收：
+
+- DeepSeek 问答、意图分支、API 消息三个模板作为前端快速起点。
+- 发布后版本面板只展示易读状态，原始路径、hash、生成时间进入调试详情。
+- Run 面板展示当前运行版本、代码状态、hash 和 `code_modified` 提示。
+- Trace 面板按节点展示输入、输出、耗时、错误，并用中文说明代码路径、运行 hash、发布 hash、本地改动。
+- 核心 Smoke 覆盖创建模板工作流、发布、运行、获取结果、获取 Trace。
 
 新增后端错误码：
 

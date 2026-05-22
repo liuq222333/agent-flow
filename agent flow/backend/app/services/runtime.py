@@ -16,8 +16,20 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.config import get_settings
-from app.services import generated_runtime, human_approvals, knowledge_processing
+from app.services import generated_runtime, human_approvals, knowledge_processing, runtime_errors
 from app.services.generated_runtime import GeneratedWorkflow, WorkflowCodeError
+from app.services.runtime_errors import (
+    RuntimeNodeError,
+    _api_response_error,
+    _http_status_is_success,
+    _normalize_node_error,
+    _redact_api_runtime_error,
+    _redact_sensitive_data,
+    _redact_sensitive_mapping,
+    _redact_sensitive_text,
+    _with_llm_metadata,
+    _workflow_error_info,
+)
 from app.services.secrets import get_secret_value, resolve_deepseek_api_key, resolve_openai_api_key
 
 Graph = dict[str, Any]
@@ -27,18 +39,6 @@ _PLACEHOLDER_RE = re.compile(r"{{\s*([^}]+)\s*}}")
 _BACKEND_ROOT = generated_runtime.BACKEND_ROOT
 _PROJECT_ROOT = generated_runtime.PROJECT_ROOT
 _GENERATED_ROOT = generated_runtime.GENERATED_ROOT
-_SENSITIVE_KEYWORDS = {
-    "authorization",
-    "proxy-authorization",
-    "x-api-key",
-    "api-key",
-    "apikey",
-    "token",
-    "access-token",
-    "refresh-token",
-    "secret",
-    "password",
-}
 _MISSING = object()
 _NODE_DEFAULT_TIMEOUT_SECONDS = {
     "llm": 60.0,
@@ -50,29 +50,12 @@ _NODE_DEFAULT_TIMEOUT_SECONDS = {
 }
 _API_DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024
 _API_MAX_RESPONSE_BYTES = 5 * 1024 * 1024
-_MODEL_ERROR_CODES = {
-    "model_api_key_missing",
-    "model_request_failed",
-    "model_response_invalid",
-    "model_timeout",
-}
-
-
-class RuntimeNodeError(Exception):
-    def __init__(
-        self,
-        error_code: str,
-        message: str | None = None,
-        *,
-        retryable: bool = False,
-        error_detail: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(message or error_code)
-        self.error_code = error_code
-        self.retryable = retryable
-        self.error_detail = error_detail or {}
-
-
+_normalize_http_status_error = runtime_errors._normalize_http_status_error
+_normalize_status_error = runtime_errors._normalize_status_error
+_safe_exception_message = runtime_errors._safe_exception_message
+_safe_response_preview = runtime_errors._safe_response_preview
+_redact_sensitive_value = runtime_errors._redact_sensitive_value
+_is_sensitive_key = runtime_errors._is_sensitive_key
 class HumanApprovalPause(Exception):
     def __init__(self, *, node_id: str, task_id: int, output: dict[str, Any]) -> None:
         super().__init__("workflow is waiting for human approval")
@@ -746,161 +729,6 @@ async def _sleep_before_retry(retry_policy: dict[str, Any], attempt: int) -> Non
     raise RuntimeNodeError("invalid_config", f"unsupported retry backoff: {backoff}")
 
 
-def _normalize_node_error(exc: Exception, node: dict[str, Any] | None = None) -> RuntimeNodeError:
-    if isinstance(exc, RuntimeNodeError):
-        return exc
-    node_type = str((node or {}).get("type") or "")
-    status_code = getattr(exc, "status_code", None)
-    if status_code is not None:
-        return _normalize_status_error(int(status_code), _safe_exception_message(exc), node_type)
-    class_name = exc.__class__.__name__.lower()
-    if "ratelimit" in class_name or "rate_limit" in class_name:
-        if node_type == "llm":
-            return RuntimeNodeError(
-                "model_request_failed",
-                _safe_exception_message(exc),
-                retryable=True,
-            )
-        return RuntimeNodeError("rate_limit", str(exc), retryable=True)
-    if "connection" in class_name and node_type == "llm":
-        return RuntimeNodeError(
-            "model_request_failed",
-            _safe_exception_message(exc),
-            retryable=True,
-        )
-    if isinstance(exc, TimeoutError) or "timeout" in class_name:
-        error_code = "model_timeout" if node_type == "llm" else "timeout"
-        return RuntimeNodeError(error_code, _safe_exception_message(exc), retryable=True)
-    if isinstance(exc, httpx.TimeoutException):
-        error_code = "model_timeout" if node_type == "llm" else "timeout"
-        return RuntimeNodeError(error_code, _safe_exception_message(exc), retryable=True)
-    if isinstance(exc, httpx.HTTPStatusError):
-        return _normalize_http_status_error(exc, node_type=node_type or "api")
-    if isinstance(exc, (httpx.ConnectError, httpx.NetworkError)):
-        if node_type == "llm":
-            return RuntimeNodeError(
-                "model_request_failed",
-                _safe_exception_message(exc),
-                retryable=True,
-            )
-        return RuntimeNodeError("network_error", str(exc), retryable=True)
-    if isinstance(exc, httpx.RequestError):
-        if node_type == "llm":
-            return RuntimeNodeError(
-                "model_request_failed",
-                _safe_exception_message(exc),
-                retryable=True,
-            )
-        return RuntimeNodeError("api_request_error", str(exc), retryable=True)
-    if isinstance(exc, ValueError):
-        return RuntimeNodeError("invalid_config", str(exc))
-
-    if node_type == "llm":
-        return RuntimeNodeError(
-            "model_request_failed",
-            _safe_exception_message(exc),
-            retryable=True,
-        )
-    if node_type == "knowledge_base":
-        return RuntimeNodeError("knowledge_base_error", str(exc), retryable=True)
-    if node_type == "api":
-        return RuntimeNodeError("api_request_error", str(exc), retryable=True)
-    return RuntimeNodeError("unknown_error", str(exc) or exc.__class__.__name__)
-
-
-def _normalize_http_status_error(
-    exc: httpx.HTTPStatusError,
-    *,
-    node_type: str = "api",
-) -> RuntimeNodeError:
-    status_code = exc.response.status_code
-    return _normalize_status_error(status_code, _safe_exception_message(exc), node_type)
-
-
-def _normalize_status_error(status_code: int, message: str, node_type: str) -> RuntimeNodeError:
-    if node_type == "llm":
-        return RuntimeNodeError(
-            "model_request_failed",
-            _redact_sensitive_text(message),
-            retryable=status_code == 429 or status_code >= 500,
-            error_detail={"status_code": status_code},
-        )
-    if status_code == 429:
-        return RuntimeNodeError(
-            "rate_limit",
-            _redact_sensitive_text(message),
-            retryable=True,
-            error_detail={"status_code": status_code},
-        )
-    if 500 <= status_code:
-        error_code = "llm_provider_error" if node_type == "llm" else "api_response_error"
-        return RuntimeNodeError(
-            error_code,
-            _redact_sensitive_text(message),
-            retryable=True,
-            error_detail={"status_code": status_code},
-        )
-    if 400 <= status_code:
-        error_code = "llm_provider_error" if node_type == "llm" else "api_response_error"
-        return RuntimeNodeError(
-            error_code,
-            _redact_sensitive_text(message),
-            retryable=False,
-            error_detail={"status_code": status_code},
-        )
-    return RuntimeNodeError(
-        "unknown_error",
-        _redact_sensitive_text(message),
-        retryable=False,
-        error_detail={"status_code": status_code},
-    )
-
-
-def _safe_exception_message(exc: Exception, secrets: tuple[str, ...] = ()) -> str:
-    return _redact_sensitive_text(str(exc) or exc.__class__.__name__, secrets=secrets)
-
-
-def _redact_sensitive_text(value: str, *, secrets: tuple[str, ...] = ()) -> str:
-    if not value:
-        return value
-    redacted = value
-    for secret in secrets:
-        if secret:
-            redacted = redacted.replace(secret, "***")
-    redacted = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "***", redacted)
-    redacted = re.sub(
-        r"(?i)(authorization\s*[:=]\s*bearer\s+)[^,\s;)}]+",
-        r"\1***",
-        redacted,
-    )
-    redacted = re.sub(
-        r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}",
-        r"\1***",
-        redacted,
-    )
-    redacted = re.sub(
-        r"(?i)((?:api[_-]?key|x-api-key|token|secret|password)\s*[:=]\s*)[\"']?[^,\s\"'}]+",
-        r"\1***",
-        redacted,
-    )
-    return redacted
-
-
-def _redact_sensitive_data(value: Any, *, secrets: tuple[str, ...] = ()) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: _redact_sensitive_value(_redact_sensitive_data(item, secrets=secrets))
-            if _is_sensitive_key(str(key))
-            else _redact_sensitive_data(item, secrets=secrets)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_sensitive_data(item, secrets=secrets) for item in value]
-    if isinstance(value, str):
-        return _redact_sensitive_text(value, secrets=secrets)
-    return value
-
-
 def _as_bool(value: Any, *, default: bool = False) -> bool:
     if value is None:
         return default
@@ -909,15 +737,6 @@ def _as_bool(value: Any, *, default: bool = False) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
-
-
-def _workflow_error_info(exc: Exception) -> tuple[str, str]:
-    if isinstance(exc, RuntimeNodeError):
-        return exc.error_code, str(exc)
-    if isinstance(exc, WorkflowCodeError):
-        return exc.code, str(exc)
-    return "unknown_error", str(exc) or exc.__class__.__name__
-
 
 def _pending_run_state(run: dict[str, Any]) -> State:
     saved_state = run.get("state_json")
@@ -1019,12 +838,12 @@ async def _execute_node(
     raw_config = node.get("config") or {}
     config = (
         raw_config
-        if node_type == "api"
+        if node_type in {"api", "output", "end"}
         else _resolve_value_with_node_input(raw_config, state, node_input)
     )
 
     if node_type == "start":
-        return {"started": True}
+        return _execute_start_node(config, state)
     if node_type == "input":
         return {"input": state["input"]}
     if node_type == "knowledge_base":
@@ -1047,12 +866,87 @@ async def _execute_node(
     if node_type == "set_variable":
         return _execute_set_variable_node(config, state)
     if node_type == "output":
-        output = _resolve_value(config.get("outputs", state.get("variables", {})), state)
-        state["final_output"] = output if isinstance(output, dict) else {"result": output}
-        return state["final_output"]
+        return _execute_final_output_node(config, state, node_label="output")
     if node_type == "end":
+        if _has_final_output_config(config):
+            return _execute_final_output_node(config, state, node_label="end")
         return {"completed": True}
     raise RuntimeNodeError("invalid_config", f"unsupported node type: {node_type}")
+
+
+def _execute_start_node(config: dict[str, Any], state: State) -> dict[str, Any]:
+    run_input = state.get("input") if isinstance(state.get("input"), dict) else {}
+    output: dict[str, Any] = {"started": True}
+    fields = config.get("fields")
+    if isinstance(fields, list) and fields:
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            name = str(field.get("name") or "").strip()
+            if not name:
+                continue
+            if name in run_input:
+                output[name] = run_input[name]
+                continue
+            if name == "rawQuery" and "user_query" in run_input:
+                output[name] = run_input["user_query"]
+                continue
+            if name == "user_query" and "rawQuery" in run_input:
+                output[name] = run_input["rawQuery"]
+                continue
+            if "default" in field:
+                output[name] = _resolve_value(field.get("default"), state)
+    else:
+        output.update(run_input)
+    return output
+
+
+def _has_final_output_config(config: dict[str, Any]) -> bool:
+    return bool(config.get("response_mode") or config.get("outputs") or config.get("template"))
+
+
+def _execute_final_output_node(
+    config: dict[str, Any],
+    state: State,
+    *,
+    node_label: str,
+) -> dict[str, Any]:
+    mode = str(config.get("response_mode") or "parameters").strip().lower()
+    if mode not in {"parameters", "template"}:
+        raise RuntimeNodeError(
+            "invalid_config",
+            f"{node_label} node response_mode must be parameters or template",
+            error_detail={"response_mode": config.get("response_mode")},
+        )
+
+    raw_outputs = config.get("outputs")
+    if not isinstance(raw_outputs, dict):
+        raise RuntimeNodeError(
+            "invalid_config",
+            f"{node_label} node requires config.outputs object",
+        )
+
+    output_params = _resolve_value(raw_outputs, state)
+    if not isinstance(output_params, dict):
+        raise RuntimeNodeError(
+            "invalid_config",
+            f"{node_label} node config.outputs must resolve to an object",
+        )
+
+    if mode == "template":
+        template = config.get("template")
+        if not isinstance(template, str) or not template.strip():
+            raise RuntimeNodeError(
+                "invalid_config",
+                f"{node_label} node template mode requires config.template",
+            )
+        state["final_output"] = {
+            "output": _render_output_template(template, output_params, state),
+        }
+        return state["final_output"]
+
+    state["final_output"] = output_params
+    return output_params
 
 
 async def _execute_human_approval_node(
@@ -1255,16 +1149,30 @@ async def _execute_llm_node(
         or effective_config.get("model")
         or ("local-mock" if provider in {"mock", "local", "local-mock"} else "gpt-4.1-mini")
     )
-    prompt = _resolve_value(
+    prompt = _resolve_value_with_node_input(
         effective_config.get("user_prompt") or effective_config.get("prompt") or "",
         state,
+        node_input,
     )
-    system_prompt = _resolve_value(effective_config.get("system_prompt") or "", state)
-    question = state.get("input", {}).get("user_query") or node_input.get("question") or prompt
+    system_prompt = _resolve_value_with_node_input(
+        effective_config.get("system_prompt") or "",
+        state,
+        node_input,
+    )
+    run_input = state.get("input") if isinstance(state.get("input"), dict) else {}
+    question = (
+        node_input.get("query")
+        or node_input.get("question")
+        or run_input.get("rawQuery")
+        or run_input.get("user_query")
+        or prompt
+    )
 
     if provider in {"mock", "local", "local-mock"}:
+        answer = f"模拟回答：{question}"
         return {
-            "answer": f"模拟回答：{question}",
+            "output": answer,
+            "answer": answer,
             "provider": provider,
             "model": model,
             "model_config_id": model_binding.get("model_config_id"),
@@ -1340,6 +1248,7 @@ async def _execute_llm_node(
 
     answer, reasoning_content, usage = _extract_llm_response(response, llm_metadata)
     return {
+        "output": answer,
         "answer": answer,
         "reasoning_content": reasoning_content,
         "provider": provider,
@@ -1371,24 +1280,6 @@ def _llm_metadata(
         "model_config_id": model_config_id,
     }
     return {key: value for key, value in metadata.items() if value is not None}
-
-
-def _with_llm_metadata(
-    error: RuntimeNodeError,
-    metadata: dict[str, Any],
-    *,
-    secrets: tuple[str, ...] = (),
-) -> RuntimeNodeError:
-    error_code = (
-        error.error_code if error.error_code in _MODEL_ERROR_CODES else "model_request_failed"
-    )
-    error_detail = {**metadata, **_redact_sensitive_data(error.error_detail, secrets=secrets)}
-    return RuntimeNodeError(
-        error_code,
-        _redact_sensitive_text(str(error), secrets=secrets),
-        retryable=error.retryable,
-        error_detail=error_detail,
-    )
 
 
 def _extract_llm_response(
@@ -1650,6 +1541,8 @@ def _apply_output_mapping(node: dict[str, Any], output: dict[str, Any], state: S
 
     if node.get("type") == "llm" and "answer" in output:
         state["variables"].setdefault("answer", output["answer"])
+    if node.get("type") == "llm" and "output" in output:
+        state["variables"].setdefault("output", output["output"])
     if node.get("type") == "knowledge_base" and "chunks" in output:
         state["variables"].setdefault("kb_context", output["chunks"])
 
@@ -1776,7 +1669,15 @@ async def _execute_api_node(
     state: State,
     node_input: dict[str, Any],
 ) -> dict[str, Any]:
-    request = await _resolve_value_for_request(conn, config, state, node_input)
+    resolved_secrets: list[str] = []
+    request = await _resolve_value_for_request(
+        conn,
+        config,
+        state,
+        node_input,
+        resolved_secrets=resolved_secrets,
+    )
+    secret_values = tuple(secret for secret in resolved_secrets if secret)
     safe_request = _redact_secrets_in_value(config)
     safe_request = _resolve_value_with_node_input(safe_request, state, node_input)
     mode = str(request.get("mode") or request.get("execution_mode") or "mock").lower()
@@ -1846,8 +1747,15 @@ async def _execute_api_node(
                 response.status_code,
                 success_status_codes,
             ):
-                raise _api_response_error(response.status_code, response_body)
-            extracted_response = _extract_response_path(response_body, response_path)
+                raise _api_response_error(
+                    response.status_code,
+                    response_body,
+                    secrets=secret_values,
+                )
+            extracted_response = _redact_sensitive_data(
+                _extract_response_path(response_body, response_path),
+                secrets=secret_values,
+            )
             return {
                 "mode": "http",
                 "status": "success",
@@ -1864,11 +1772,14 @@ async def _execute_api_node(
                 "max_response_bytes": max_response_bytes,
                 "error": None,
             }
-        except RuntimeNodeError:
-            raise
+        except RuntimeNodeError as exc:
+            raise _redact_api_runtime_error(exc, secrets=secret_values) from exc
         except Exception as exc:
             if fail_on_request_error:
-                raise _normalize_node_error(exc, {"type": "api"}) from exc
+                raise _redact_api_runtime_error(
+                    _normalize_node_error(exc, {"type": "api"}),
+                    secrets=secret_values,
+                ) from exc
             return {
                 "mode": "http",
                 "status": "error",
@@ -1881,16 +1792,22 @@ async def _execute_api_node(
                     safe_query_params,
                 ),
                 "response": None,
-                "error": f"{exc.__class__.__name__}: {exc}",
+                "error": _redact_sensitive_text(
+                    f"{exc.__class__.__name__}: {exc}",
+                    secrets=secret_values,
+                ),
             }
 
     safe_body = safe_request.get("body", node_input)
     safe_headers = safe_request.get("headers") or {}
     safe_url = safe_request.get("url") or safe_request.get("endpoint")
     safe_query_params = safe_request.get("query_params") or safe_request.get("params") or {}
-    mock_response = _extract_response_path(
-        request.get("mock_response", {"ok": True}),
-        response_path,
+    mock_response = _redact_sensitive_data(
+        _extract_response_path(
+            request.get("mock_response", {"ok": True}),
+            response_path,
+        ),
+        secrets=secret_values,
     )
     return {
         "mode": "mock",
@@ -1915,7 +1832,7 @@ def _request_payload(
         "url": url,
         "query_params": _redact_sensitive_mapping(query_params or {}),
         "headers": _redact_sensitive_mapping(headers),
-        "body": body,
+        "body": _redact_sensitive_data(body),
     }
 
 
@@ -1981,24 +1898,6 @@ def _bounded_float(
     return parsed
 
 
-def _http_status_is_success(status_code: int, success_status_codes: set[int]) -> bool:
-    if success_status_codes:
-        return status_code in success_status_codes
-    return 200 <= status_code < 300
-
-
-def _api_response_error(status_code: int, response_body: Any) -> RuntimeNodeError:
-    error = _normalize_status_error(status_code, f"API returned HTTP {status_code}", "api")
-    error.error_detail["response_preview"] = _safe_response_preview(response_body)
-    return error
-
-
-def _safe_response_preview(value: Any) -> Any:
-    redacted = _redact_sensitive_mapping(value) if isinstance(value, dict) else value
-    preview = str(redacted)
-    return preview[:500]
-
-
 def _extract_response_path(response_body: Any, response_path: Any) -> Any:
     if response_path in {None, ""}:
         return response_body
@@ -2049,23 +1948,52 @@ async def _resolve_value_for_request(
     value: Any,
     state: State,
     node_input: dict[str, Any],
+    *,
+    resolved_secrets: list[str] | None = None,
 ) -> Any:
     if isinstance(value, dict):
         return {
-            key: await _resolve_value_for_request(conn, item, state, node_input)
+            key: await _resolve_value_for_request(
+                conn,
+                item,
+                state,
+                node_input,
+                resolved_secrets=resolved_secrets,
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [await _resolve_value_for_request(conn, item, state, node_input) for item in value]
+        return [
+            await _resolve_value_for_request(
+                conn,
+                item,
+                state,
+                node_input,
+                resolved_secrets=resolved_secrets,
+            )
+            for item in value
+        ]
     if not isinstance(value, str):
         return value
 
     full_match = _PLACEHOLDER_RE.fullmatch(value)
     if full_match:
-        return await _get_request_path(conn, full_match.group(1).strip(), state, node_input)
+        return await _get_request_path(
+            conn,
+            full_match.group(1).strip(),
+            state,
+            node_input,
+            resolved_secrets=resolved_secrets,
+        )
 
     async def resolve_match(match: re.Match[str]) -> str:
-        resolved = await _get_request_path(conn, match.group(1).strip(), state, node_input)
+        resolved = await _get_request_path(
+            conn,
+            match.group(1).strip(),
+            state,
+            node_input,
+            resolved_secrets=resolved_secrets,
+        )
         return "" if resolved is None else str(resolved)
 
     parts: list[str] = []
@@ -2083,11 +2011,15 @@ async def _get_request_path(
     path: str,
     state: State,
     node_input: dict[str, Any],
+    *,
+    resolved_secrets: list[str] | None = None,
 ) -> Any:
     if path.startswith("secrets."):
         value = await get_secret_value(conn, path.removeprefix("secrets."))
         if value is None:
             raise RuntimeNodeError("permission_denied", f"Secret not found: {path}")
+        if resolved_secrets is not None and isinstance(value, str):
+            resolved_secrets.append(value)
         return value
     return _get_path_with_node_input(path, state, node_input)
 
@@ -2109,31 +2041,6 @@ def _redact_secrets_in_value(value: Any) -> Any:
     )
 
 
-def _redact_sensitive_mapping(value: Any) -> Any:
-    if not isinstance(value, dict):
-        return value
-    redacted: dict[str, Any] = {}
-    for key, item in value.items():
-        if _is_sensitive_key(str(key)):
-            redacted[key] = _redact_sensitive_value(item)
-        elif isinstance(item, dict):
-            redacted[key] = _redact_sensitive_mapping(item)
-        else:
-            redacted[key] = item
-    return redacted
-
-
-def _redact_sensitive_value(value: Any) -> Any:
-    if isinstance(value, str) and "***" in value:
-        return value
-    return "***" if value else value
-
-
-def _is_sensitive_key(key: str) -> bool:
-    normalized = key.strip().lower().replace("_", "-")
-    return any(keyword in normalized for keyword in _SENSITIVE_KEYWORDS)
-
-
 def _resolve_value(value: Any, state: State) -> Any:
     if isinstance(value, dict):
         return {key: _resolve_value(item, state) for key, item in value.items()}
@@ -2151,6 +2058,20 @@ def _resolve_value(value: Any, state: State) -> Any:
         return "" if resolved is None else str(resolved)
 
     return _PLACEHOLDER_RE.sub(replace, value)
+
+
+def _render_output_template(template: str, output_params: dict[str, Any], state: State) -> str:
+    local_state = {**output_params, "parameters": output_params}
+
+    def replace(match: re.Match[str]) -> str:
+        path = match.group(1).strip()
+        local_value = _try_get_path(path, local_state)
+        if local_value is not _MISSING:
+            return "" if local_value is None else str(local_value)
+        resolved = _get_path(path, state)
+        return "" if resolved is None else str(resolved)
+
+    return _PLACEHOLDER_RE.sub(replace, template)
 
 
 def _resolve_value_with_node_input(value: Any, state: State, node_input: dict[str, Any]) -> Any:

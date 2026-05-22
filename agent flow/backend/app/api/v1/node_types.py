@@ -24,8 +24,8 @@ NODE_TYPE_SUMMARIES: dict[str, dict[str, str]] = {
     "start": {
         "type": "start",
         "name": "开始",
-        "category": "control",
-        "description": "工作流开始节点，只能有出边。",
+        "category": "io",
+        "description": "声明工作流输入字段，并作为流程起点。",
     },
     "input": {
         "type": "input",
@@ -85,13 +85,13 @@ NODE_TYPE_SUMMARIES: dict[str, dict[str, str]] = {
         "type": "output",
         "name": "最终输出",
         "category": "io",
-        "description": "生成工作流最终输出。",
+        "description": "历史兼容节点。新工作流请在结束节点配置最终输出。",
     },
     "end": {
         "type": "end",
         "name": "结束",
-        "category": "control",
-        "description": "工作流结束节点，只能有入边。",
+        "category": "io",
+        "description": "工作流结束节点，并生成最终输出。",
     },
 }
 
@@ -140,7 +140,29 @@ BASE_NODE_SCHEMA: dict[str, Any] = {
 }
 
 CONFIG_SCHEMAS: dict[str, dict[str, Any]] = {
-    "start": {"type": "object", "properties": {}, "additionalProperties": False},
+    "start": {
+        "type": "object",
+        "properties": {
+            "fields": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["name", "type"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "type": {
+                            "type": "string",
+                            "enum": ["string", "number", "boolean", "array", "object", "json"],
+                        },
+                        "label": {"type": "string"},
+                        "required": {"type": "boolean", "default": False},
+                        "default": {},
+                    },
+                },
+                "default": [],
+            }
+        },
+    },
     "input": {
         "type": "object",
         "properties": {
@@ -331,9 +353,42 @@ CONFIG_SCHEMAS: dict[str, dict[str, Any]] = {
     "output": {
         "type": "object",
         "required": ["outputs"],
-        "properties": {"outputs": {"type": "object", "additionalProperties": True}},
+        "properties": {
+            "response_mode": {
+                "type": "string",
+                "enum": ["parameters", "template"],
+                "default": "parameters",
+            },
+            "outputs": {"type": "object", "additionalProperties": True},
+            "template": {"type": "string", "default": ""},
+            "output_value_kinds": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "string",
+                    "enum": ["reference", "text", "number", "boolean", "json"],
+                },
+            },
+        },
     },
-    "end": {"type": "object", "properties": {}, "additionalProperties": False},
+    "end": {
+        "type": "object",
+        "properties": {
+            "response_mode": {
+                "type": "string",
+                "enum": ["parameters", "template"],
+                "default": "parameters",
+            },
+            "outputs": {"type": "object", "additionalProperties": True},
+            "template": {"type": "string", "default": ""},
+            "output_value_kinds": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "string",
+                    "enum": ["reference", "text", "number", "boolean", "json"],
+                },
+            },
+        },
+    },
 }
 
 FORM_SCHEMAS: dict[str, dict[str, Any]] = {
@@ -345,7 +400,7 @@ FORM_SCHEMAS: dict[str, dict[str, Any]] = {
         ],
     }
     for node_type, fields in {
-        "start": [],
+        "start": [("config.fields", "输入字段", "field_array", False)],
         "input": [("config.fields", "输入字段", "field_array", False)],
         "llm": [
             ("config.model_config_id", "模型配置", "select", False),
@@ -390,8 +445,16 @@ FORM_SCHEMAS: dict[str, dict[str, Any]] = {
             ("config.message_type", "消息类型", "select", True),
             ("config.template", "模板", "textarea", True),
         ],
-        "output": [("config.outputs", "输出", "key_value", True)],
-        "end": [],
+        "output": [
+            ("config.response_mode", "回复模式", "select", False),
+            ("config.outputs", "输出", "key_value", True),
+            ("config.template", "回复模板", "textarea", False),
+        ],
+        "end": [
+            ("config.response_mode", "回复模式", "select", False),
+            ("config.outputs", "输出", "key_value", True),
+            ("config.template", "回复模板", "textarea", False),
+        ],
     }.items()
 }
 

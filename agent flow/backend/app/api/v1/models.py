@@ -17,6 +17,32 @@ from app.services.audit import write_audit_log
 router = APIRouter(tags=["models"])
 
 
+@router.get("/model-defaults")
+async def model_defaults() -> dict[str, Any]:
+    settings = get_settings()
+    deepseek_model = settings.deepseek_default_model.strip() or "deepseek-v4-flash"
+    return {
+        "default_provider": settings.default_model_provider,
+        "deepseek": {
+            "provider_name": "deepseek",
+            "provider_type": "deepseek",
+            "base_url": settings.deepseek_base_url,
+            "api_key_secret": settings.deepseek_api_key_secret,
+            "model_name": deepseek_model,
+            "model_type": "chat",
+            "display_name": _deepseek_display_name(deepseek_model),
+            "context_window": settings.deepseek_default_context_window,
+            "default_config": {
+                "temperature": 0.3,
+                "max_tokens": 1000,
+                "model_version": deepseek_model,
+                "api_model_alias": deepseek_model,
+                "thinking_mode": False,
+            },
+        },
+    }
+
+
 @router.post("/model-providers", status_code=status.HTTP_201_CREATED)
 async def create_model_provider(payload: CreateModelProviderRequest) -> dict[str, Any]:
     settings = get_settings()
@@ -111,7 +137,12 @@ async def list_model_providers(
             ),
             params,
         )
-        return {"items": [dict(row) for row in result.mappings()]}
+        providers = []
+        for row in result.mappings():
+            provider = dict(row)
+            provider["diagnostic"] = await _diagnose_model_provider(conn, provider)
+            providers.append(provider)
+        return {"items": providers}
 
 
 @router.put("/model-providers/{provider_id}")
@@ -504,14 +535,142 @@ async def _validate_provider_config(
     )
     if result.scalar_one_or_none() is None:
         provider_name = provider_type.strip().lower()
-        if provider_name == "openai" and secret_key == "openai_api_key":
+        settings = get_settings()
+        if provider_name == "openai" and secret_key == settings.openai_api_key_secret:
             return
-        if provider_name == "deepseek" and secret_key == "deepseek_api_key":
+        if provider_name == "deepseek" and secret_key == settings.deepseek_api_key_secret:
             return
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="config.api_key_secret must reference an active secret",
         )
+
+
+async def _diagnose_model_provider(conn, provider: dict[str, Any]) -> dict[str, Any]:
+    provider_type = str(provider.get("provider_type") or "").strip().lower()
+    provider_status = str(provider.get("status") or "").strip().lower()
+    provider_config = provider.get("config_json") or {}
+    if not isinstance(provider_config, dict):
+        provider_config = {}
+
+    requires_api_key = _provider_requires_api_key(provider_type)
+    secret_key = str(
+        provider_config.get("api_key_secret") or _default_api_key_secret(provider_type) or ""
+    ).strip()
+    env_name, env_available = _provider_env_key_status(provider_type)
+    effective_base_url = _effective_provider_base_url(provider_type, provider.get("base_url"))
+
+    if not requires_api_key:
+        return {
+            "status": "not_required",
+            "message": "provider does not require an API key",
+            "requires_api_key": False,
+            "api_key_available": True,
+            "api_key_source": "not_required",
+            "api_key_env": None,
+            "api_key_secret": None,
+            "base_url_effective": effective_base_url,
+        }
+
+    if provider_status != "active":
+        return {
+            "status": "disabled",
+            "message": "provider is disabled",
+            "requires_api_key": True,
+            "api_key_available": False,
+            "api_key_source": "none",
+            "api_key_env": env_name,
+            "api_key_secret": secret_key or None,
+            "base_url_effective": effective_base_url,
+        }
+
+    if env_available:
+        return {
+            "status": "ready",
+            "message": f"{env_name} is configured",
+            "requires_api_key": True,
+            "api_key_available": True,
+            "api_key_source": "env",
+            "api_key_env": env_name,
+            "api_key_secret": secret_key or None,
+            "base_url_effective": effective_base_url,
+        }
+
+    secret_available = await _active_secret_exists(conn, secret_key) if secret_key else False
+    if secret_available:
+        return {
+            "status": "ready",
+            "message": f"active secret {secret_key} is configured",
+            "requires_api_key": True,
+            "api_key_available": True,
+            "api_key_source": "secret",
+            "api_key_env": env_name,
+            "api_key_secret": secret_key,
+            "base_url_effective": effective_base_url,
+        }
+
+    return {
+        "status": "missing_api_key",
+        "message": "set the provider API key in env or an active secret",
+        "requires_api_key": True,
+        "api_key_available": False,
+        "api_key_source": "none",
+        "api_key_env": env_name,
+        "api_key_secret": secret_key or None,
+        "base_url_effective": effective_base_url,
+    }
+
+
+async def _active_secret_exists(conn, secret_key: str) -> bool:
+    result = await conn.execute(
+        text(
+            """
+            SELECT 1
+            FROM secrets
+            WHERE secret_key = :secret_key
+              AND deleted_at IS NULL
+              AND status = 'active'
+            LIMIT 1
+            """
+        ),
+        {"secret_key": secret_key},
+    )
+    return result.scalar_one_or_none() is not None
+
+
+def _provider_env_key_status(provider_type: str) -> tuple[str | None, bool]:
+    settings = get_settings()
+    provider_name = provider_type.strip().lower()
+    if provider_name == "deepseek":
+        return "DEEPSEEK_API_KEY", bool(settings.deepseek_api_key)
+    if provider_name == "openai":
+        return "OPENAI_API_KEY", bool(settings.openai_api_key)
+    return None, False
+
+
+def _default_api_key_secret(provider_type: str) -> str | None:
+    settings = get_settings()
+    provider_name = provider_type.strip().lower()
+    if provider_name == "deepseek":
+        return settings.deepseek_api_key_secret
+    if provider_name == "openai":
+        return settings.openai_api_key_secret
+    return None
+
+
+def _effective_provider_base_url(provider_type: str, base_url: Any) -> str | None:
+    if base_url:
+        return str(base_url)
+    if provider_type.strip().lower() == "deepseek":
+        return get_settings().deepseek_base_url
+    return None
+
+
+def _deepseek_display_name(model_name: str) -> str:
+    if model_name == "deepseek-v4-flash":
+        return "DeepSeek V4-Flash"
+    cleaned = model_name.removeprefix("deepseek-").replace("-", " ").strip()
+    return f"DeepSeek {cleaned.title()}" if cleaned else "DeepSeek"
 
 
 def _provider_requires_api_key(provider_type: str) -> bool:

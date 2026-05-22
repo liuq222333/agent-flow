@@ -671,6 +671,13 @@ async def test_api_node_http_private_url_is_rejected() -> None:
     assert "private network" in output["error"]
 
 
+def test_api_http_link_local_url_is_rejected() -> None:
+    error = runtime._validate_public_http_url("http://169.254.169.254/latest/meta-data")
+
+    assert error is not None
+    assert "private network" in error
+
+
 @pytest.mark.asyncio
 async def test_api_secret_placeholder_is_resolved_but_not_leaked(monkeypatch) -> None:
     state = {
@@ -705,6 +712,205 @@ async def test_api_secret_placeholder_is_resolved_but_not_leaked(monkeypatch) ->
     assert output["request"]["headers"]["authorization"] == "Bearer ***"
     assert output["request"]["body"]["token"] == "***"
     assert "super-secret-token" not in str(output)
+
+
+@pytest.mark.asyncio
+async def test_api_mock_response_secret_echo_is_redacted(monkeypatch) -> None:
+    state = {
+        "input": {},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+
+    async def fake_secret(conn, key):
+        assert key == "api_token"
+        return "super-secret-token"
+
+    monkeypatch.setattr(runtime, "get_secret_value", fake_secret)
+
+    node = {
+        "id": "api_1",
+        "type": "api",
+        "config": {
+            "mode": "mock",
+            "method": "POST",
+            "url": "https://api.example.test",
+            "headers": {"authorization": "Bearer {{ secrets.api_token }}"},
+            "mock_response": {
+                "data": {
+                    "echo": "{{ secrets.api_token }}",
+                    "accepted": True,
+                }
+            },
+            "response_path": "data",
+        },
+    }
+
+    output = await runtime._execute_node(_FakeConnection(), node, state, {})
+
+    assert output["response"] == {"echo": "***", "accepted": True}
+    assert "super-secret-token" not in str(output)
+
+
+@pytest.mark.asyncio
+async def test_api_http_response_secret_echo_is_redacted(monkeypatch) -> None:
+    state = {
+        "input": {},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+
+    async def fake_secret(conn, key):
+        assert key == "api_token"
+        return "super-secret-token"
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def request(self, method, url, headers=None, json=None, params=None):
+            assert headers["authorization"] == "Bearer super-secret-token"
+            request = runtime.httpx.Request(method, url)
+            return runtime.httpx.Response(
+                200,
+                json={"data": {"echo": "super-secret-token", "accepted": True}},
+                request=request,
+            )
+
+    monkeypatch.setattr(runtime, "get_secret_value", fake_secret)
+    monkeypatch.setattr(runtime, "_validate_public_http_url", lambda url: None)
+    monkeypatch.setattr(runtime.httpx, "AsyncClient", lambda *args, **kwargs: FakeClient())
+
+    node = {
+        "id": "api_1",
+        "type": "api",
+        "config": {
+            "mode": "http",
+            "method": "POST",
+            "url": "https://api.example.test",
+            "headers": {"authorization": "Bearer {{ secrets.api_token }}"},
+            "response_path": "data",
+        },
+    }
+
+    output = await runtime._execute_node(_FakeConnection(), node, state, {})
+
+    assert output["response"] == {"echo": "***", "accepted": True}
+    assert "super-secret-token" not in str(output)
+
+
+@pytest.mark.asyncio
+async def test_api_http_request_error_without_fail_does_not_leak_secret(monkeypatch) -> None:
+    state = {
+        "input": {},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+
+    async def fake_secret(conn, key):
+        assert key == "api_token"
+        return "super-secret-token"
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def request(self, method, url, headers=None, json=None, params=None):
+            request = runtime.httpx.Request(method, url)
+            raise runtime.httpx.RequestError(
+                "upstream rejected Authorization: Bearer super-secret-token",
+                request=request,
+            )
+
+    monkeypatch.setattr(runtime, "get_secret_value", fake_secret)
+    monkeypatch.setattr(runtime, "_validate_public_http_url", lambda url: None)
+    monkeypatch.setattr(runtime.httpx, "AsyncClient", lambda *args, **kwargs: FakeClient())
+
+    node = {
+        "id": "api_1",
+        "type": "api",
+        "config": {
+            "mode": "http",
+            "method": "POST",
+            "url": "https://api.example.test",
+            "headers": {"authorization": "Bearer {{ secrets.api_token }}"},
+            "fail_on_request_error": False,
+        },
+    }
+
+    output = await runtime._execute_node(_FakeConnection(), node, state, {})
+
+    assert output["status"] == "error"
+    assert "Bearer ***" in output["error"]
+    assert "super-secret-token" not in str(output)
+
+
+@pytest.mark.asyncio
+async def test_api_http_request_error_raises_without_leaking_secret(monkeypatch) -> None:
+    state = {
+        "input": {},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+
+    async def fake_secret(conn, key):
+        assert key == "api_token"
+        return "super-secret-token"
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def request(self, method, url, headers=None, json=None, params=None):
+            request = runtime.httpx.Request(method, url)
+            raise runtime.httpx.RequestError(
+                "upstream rejected Authorization: Bearer super-secret-token",
+                request=request,
+            )
+
+    monkeypatch.setattr(runtime, "get_secret_value", fake_secret)
+    monkeypatch.setattr(runtime, "_validate_public_http_url", lambda url: None)
+    monkeypatch.setattr(runtime.httpx, "AsyncClient", lambda *args, **kwargs: FakeClient())
+
+    node = {
+        "id": "api_1",
+        "type": "api",
+        "config": {
+            "mode": "http",
+            "method": "POST",
+            "url": "https://api.example.test",
+            "headers": {"authorization": "Bearer {{ secrets.api_token }}"},
+        },
+    }
+
+    with pytest.raises(runtime.RuntimeNodeError) as exc_info:
+        await runtime._execute_node(_FakeConnection(), node, state, {})
+
+    assert exc_info.value.error_code == "api_request_error"
+    assert "Bearer ***" in str(exc_info.value)
+    assert "super-secret-token" not in str(exc_info.value)
+    assert "super-secret-token" not in str(exc_info.value.error_detail)
 
 
 @pytest.mark.asyncio
@@ -1061,6 +1267,246 @@ async def test_message_graph_renders_template_and_maps_to_final_output() -> None
     }
     assert state["variables"]["customer_message"] == "Hi Ada, refund R-100 is queued."
     assert state["final_output"] == {"message": "Hi Ada, refund R-100 is queued."}
+
+
+@pytest.mark.asyncio
+async def test_start_node_outputs_configured_input_fields_and_raw_query_alias() -> None:
+    state = {
+        "input": {"user_query": "legacy query", "chatHistory": [{"role": "user"}]},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "start_1",
+        "type": "start",
+        "name": "Start",
+        "config": {
+            "fields": [
+                {"name": "rawQuery", "type": "string", "required": True},
+                {"name": "chatHistory", "type": "array"},
+                {"name": "request_id", "type": "string", "default": "req-default"},
+            ]
+        },
+    }
+
+    output = await runtime._execute_node(_FakeConnection(), node, state, {})
+
+    assert output == {
+        "started": True,
+        "rawQuery": "legacy query",
+        "chatHistory": [{"role": "user"}],
+        "request_id": "req-default",
+    }
+
+
+@pytest.mark.asyncio
+async def test_llm_node_uses_query_mapping_and_returns_output_alias() -> None:
+    state = {
+        "input": {"rawQuery": "请总结三段式工作流"},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "llm_1",
+        "type": "llm",
+        "name": "LLM",
+        "config": {
+            "provider": "mock",
+            "model": "local-mock",
+            "user_prompt": "问题：{{query}}",
+        },
+        "input_mapping": {"query": "{{input.rawQuery}}"},
+    }
+
+    output = await runtime._execute_node_with_retry(_FakeConnection(), 103, node, state)
+
+    assert output["output"] == "模拟回答：请总结三段式工作流"
+    assert output["answer"] == output["output"]
+    assert state["outputs"]["llm_1"]["output"] == output["output"]
+
+
+@pytest.mark.asyncio
+async def test_output_node_parameters_mode_selects_previous_node_outputs_and_keeps_types() -> None:
+    state = {
+        "input": {"user_query": "refund", "urgent": True},
+        "variables": {"intent": "refund_request", "score": 0.95},
+        "outputs": {
+            "llm_1": {"answer": "可以退款", "usage": {"total_tokens": 12}},
+            "api_1": {"response": {"ticket_id": "T-42"}, "status_code": 201},
+        },
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "config": {
+            "response_mode": "parameters",
+            "outputs": {
+                "answer": "{{outputs.llm_1.answer}}",
+                "ticket": "{{outputs.api_1.response}}",
+                "tokens": "{{outputs.llm_1.usage.total_tokens}}",
+                "urgent": "{{input.urgent}}",
+                "intent": "{{variables.intent}}",
+            },
+        },
+    }
+
+    output = await runtime._execute_node(_FakeConnection(), node, state, {})
+
+    assert output == {
+        "answer": "可以退款",
+        "ticket": {"ticket_id": "T-42"},
+        "tokens": 12,
+        "urgent": True,
+        "intent": "refund_request",
+    }
+    assert state["final_output"] == output
+
+
+@pytest.mark.asyncio
+async def test_end_node_parameters_mode_selects_start_or_llm_output() -> None:
+    state = {
+        "input": {"rawQuery": "refund"},
+        "variables": {},
+        "outputs": {
+            "start_1": {"rawQuery": "refund"},
+            "llm_1": {"output": "可以退款", "answer": "可以退款"},
+        },
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "end_1",
+        "type": "end",
+        "name": "End",
+        "config": {
+            "response_mode": "parameters",
+            "outputs": {
+                "output": "{{outputs.llm_1.output}}",
+                "rawQuery": "{{outputs.start_1.rawQuery}}",
+            },
+        },
+    }
+
+    output = await runtime._execute_node(_FakeConnection(), node, state, {})
+
+    assert output == {"output": "可以退款", "rawQuery": "refund"}
+    assert state["final_output"] == output
+
+
+@pytest.mark.asyncio
+async def test_output_node_template_mode_renders_local_output_parameters() -> None:
+    state = {
+        "input": {"user_query": "refund"},
+        "variables": {"intent": "refund_request"},
+        "outputs": {"llm_1": {"answer": "可以退款"}},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "config": {
+            "response_mode": "template",
+            "outputs": {
+                "answer": "{{outputs.llm_1.answer}}",
+                "intent": "{{variables.intent}}",
+            },
+            "template": "意图 {{intent}}，回复：{{answer}}",
+        },
+    }
+
+    output = await runtime._execute_node(_FakeConnection(), node, state, {})
+
+    assert output == {"output": "意图 refund_request，回复：可以退款"}
+    assert state["final_output"] == output
+
+
+@pytest.mark.asyncio
+async def test_end_node_template_mode_renders_local_output_parameters() -> None:
+    state = {
+        "input": {"rawQuery": "refund"},
+        "variables": {},
+        "outputs": {"llm_1": {"output": "可以退款"}},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "end_1",
+        "type": "end",
+        "name": "End",
+        "config": {
+            "response_mode": "template",
+            "outputs": {"output": "{{outputs.llm_1.output}}"},
+            "template": "最终回复：{{output}}",
+        },
+    }
+
+    output = await runtime._execute_node(_FakeConnection(), node, state, {})
+
+    assert output == {"output": "最终回复：可以退款"}
+    assert state["final_output"] == output
+
+
+@pytest.mark.asyncio
+async def test_output_node_rejects_missing_outputs_config() -> None:
+    state = {
+        "input": {},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "config": {"response_mode": "parameters"},
+    }
+
+    with pytest.raises(runtime.RuntimeNodeError) as exc_info:
+        await runtime._execute_node(_FakeConnection(), node, state, {})
+
+    assert exc_info.value.error_code == "invalid_config"
+    assert "config.outputs" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_output_node_template_mode_requires_template() -> None:
+    state = {
+        "input": {},
+        "variables": {},
+        "outputs": {},
+        "metadata": {},
+        "path": [],
+        "final_output": {},
+    }
+    node = {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "config": {"response_mode": "template", "outputs": {"answer": "ok"}},
+    }
+
+    with pytest.raises(runtime.RuntimeNodeError) as exc_info:
+        await runtime._execute_node(_FakeConnection(), node, state, {})
+
+    assert exc_info.value.error_code == "invalid_config"
+    assert "template" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -1508,6 +1954,18 @@ def test_api_decode_http_response_enforces_max_response_bytes() -> None:
 
     assert exc_info.value.error_code == "response_too_large"
     assert exc_info.value.error_detail["max_response_bytes"] == 3
+
+
+def test_api_response_error_preview_redacts_resolved_secret() -> None:
+    error = runtime._api_response_error(
+        500,
+        {"echo": "super-secret-token", "nested": {"token": "literal-token"}},
+        secrets=("super-secret-token",),
+    )
+
+    assert error.error_code == "api_response_error"
+    assert "super-secret-token" not in error.error_detail["response_preview"]
+    assert "literal-token" not in error.error_detail["response_preview"]
 
 
 @pytest.mark.asyncio

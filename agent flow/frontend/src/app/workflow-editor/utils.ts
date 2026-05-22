@@ -91,10 +91,7 @@ function hasPath(graph: WorkflowGraph, fromNodeId: string, toNodeId: string, vis
 
 export function getDefaultNextNodeType(sourceType: NodeType): NodeType {
   if (sourceType === "start") {
-    return "input";
-  }
-  if (sourceType === "input") {
-    return "intent";
+    return "llm";
   }
   if (sourceType === "intent" || sourceType === "branch") {
     return "llm";
@@ -102,11 +99,11 @@ export function getDefaultNextNodeType(sourceType: NodeType): NodeType {
   if (sourceType === "human_approval") {
     return "branch";
   }
-  if (sourceType === "llm" || sourceType === "knowledge_base" || sourceType === "api") {
+  if (sourceType === "knowledge_base" || sourceType === "api") {
     return "message";
   }
-  if (sourceType === "message") {
-    return "output";
+  if (sourceType === "llm" || sourceType === "message") {
+    return "end";
   }
   return "end";
 }
@@ -221,7 +218,7 @@ export function cloneJsonObject(value: JsonObject): JsonObject {
 
 export function groupNodeCatalog(items: NodeCatalogItem[]): Array<[string, NodeCatalogItem[]]> {
   const groups = new Map<string, NodeCatalogItem[]>();
-  items.forEach((item) => {
+  items.filter((item) => !item.hidden).forEach((item) => {
     groups.set(item.group, [...(groups.get(item.group) ?? []), item]);
   });
   return Array.from(groups.entries());
@@ -235,7 +232,7 @@ export function parseJsonObject(rawValue: string): { value?: JsonObject; error?:
   try {
     const parsed = JSON.parse(value) as unknown;
     if (!isPlainObject(parsed)) {
-      return { error: "必须是 JSON 对象，例如 {\"user_query\":\"...\"}" };
+      return { error: "必须是 JSON 对象，例如 {\"rawQuery\":\"...\"}" };
     }
     return { value: parsed };
   } catch (error) {

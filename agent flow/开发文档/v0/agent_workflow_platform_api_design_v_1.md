@@ -1117,9 +1117,20 @@ GET /api/v1/model-providers
       "id": 1,
       "name": "openai",
       "provider_type": "openai",
+      "base_url": "https://api.openai.com/v1",
       "status": "active",
       "config_json": {
         "api_key_secret": "openai_api_key"
+      },
+      "diagnostic": {
+        "status": "ready",
+        "message": "OPENAI_API_KEY is configured",
+        "requires_api_key": true,
+        "api_key_available": true,
+        "api_key_source": "env",
+        "api_key_env": "OPENAI_API_KEY",
+        "api_key_secret": "openai_api_key",
+        "base_url_effective": "https://api.openai.com/v1"
       }
     }
   ]
@@ -1130,7 +1141,42 @@ GET /api/v1/model-providers
 
 ---
 
-## 7.2 查询可用模型
+## 7.2 查询默认模型配置
+
+```http
+GET /api/v1/model-defaults
+```
+
+响应：
+
+```json
+{
+  "default_provider": "deepseek",
+  "deepseek": {
+    "provider_name": "deepseek",
+    "provider_type": "deepseek",
+    "base_url": "https://api.deepseek.com",
+    "api_key_secret": "deepseek_api_key",
+    "model_name": "deepseek-v4-flash",
+    "model_type": "chat",
+    "display_name": "DeepSeek V4-Flash",
+    "context_window": 1000000,
+    "default_config": {
+      "temperature": 0.3,
+      "max_tokens": 1000,
+      "model_version": "deepseek-v4-flash",
+      "api_model_alias": "deepseek-v4-flash",
+      "thinking_mode": false
+    }
+  }
+}
+```
+
+该接口只返回默认配置和 Secret 引用名，不返回任何明文 API Key。
+
+---
+
+## 7.3 查询可用模型
 
 ```http
 GET /api/v1/model-configs

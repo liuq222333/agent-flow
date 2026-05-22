@@ -29,21 +29,21 @@ def default_graph() -> Graph:
                 "type": "start",
                 "name": "开始",
                 "position": {"x": 80, "y": 160},
-                "config": {},
-            },
-            {
-                "id": "input_1",
-                "type": "input",
-                "name": "用户输入",
-                "position": {"x": 280, "y": 160},
                 "config": {
                     "fields": [
                         {
-                            "name": "user_query",
+                            "name": "rawQuery",
                             "type": "string",
-                            "label": "用户问题",
+                            "label": "用户输入",
                             "required": True,
-                        }
+                        },
+                        {"name": "chatHistory", "type": "array", "label": "历史消息"},
+                        {"name": "fileUrls", "type": "array", "label": "文件 URL"},
+                        {"name": "fileNames", "type": "array", "label": "文件名"},
+                        {"name": "end_user_id", "type": "string", "label": "终端用户 ID"},
+                        {"name": "conversation_id", "type": "string", "label": "会话 ID"},
+                        {"name": "request_id", "type": "string", "label": "请求 ID"},
+                        {"name": "fields", "type": "array", "label": "扩展字段"},
                     ]
                 },
             },
@@ -51,41 +51,41 @@ def default_graph() -> Graph:
                 "id": "llm_1",
                 "type": "llm",
                 "name": "生成回答",
-                "position": {"x": 500, "y": 160},
-                "output_mapping": {"answer": "variables.answer"},
+                "position": {"x": 360, "y": 160},
+                "input_mapping": {"query": "{{input.rawQuery}}"},
+                "output_mapping": {
+                    "output": "variables.output",
+                    "answer": "variables.answer",
+                },
                 "config": {
                     "provider": "mock",
                     "model": "local-mock",
                     "system_prompt": "你是一个本地调试助手。",
-                    "user_prompt": "问题：{{input.user_query}}",
+                    "user_prompt": "问题：{{query}}",
                     "temperature": 0.2,
-                },
-            },
-            {
-                "id": "output_1",
-                "type": "output",
-                "name": "最终输出",
-                "position": {"x": 720, "y": 160},
-                "config": {
-                    "outputs": {
-                        "answer": "{{variables.answer}}",
-                        "user_query": "{{input.user_query}}",
-                    }
                 },
             },
             {
                 "id": "end_1",
                 "type": "end",
                 "name": "结束",
-                "position": {"x": 920, "y": 160},
-                "config": {},
+                "position": {"x": 640, "y": 160},
+                "config": {
+                    "response_mode": "parameters",
+                    "outputs": {
+                        "output": "{{outputs.llm_1.output}}",
+                        "rawQuery": "{{input.rawQuery}}",
+                    },
+                    "output_value_kinds": {
+                        "output": "reference",
+                        "rawQuery": "reference",
+                    },
+                },
             },
         ],
         "edges": [
-            {"id": "e1", "source": "start_1", "target": "input_1"},
-            {"id": "e2", "source": "input_1", "target": "llm_1"},
-            {"id": "e3", "source": "llm_1", "target": "output_1"},
-            {"id": "e4", "source": "output_1", "target": "end_1"},
+            {"id": "e1", "source": "start_1", "target": "llm_1"},
+            {"id": "e2", "source": "llm_1", "target": "end_1"},
         ],
     }
 
@@ -108,6 +108,7 @@ def validate_graph(graph: Graph, mode: ValidationMode) -> dict[str, Any]:
     node_path_by_id: dict[str, str] = {}
     start_nodes: list[dict[str, Any]] = []
     end_nodes: list[dict[str, Any]] = []
+    output_nodes: list[dict[str, Any]] = []
 
     for index, node in enumerate(nodes):
         path = f"nodes[{index}]"
@@ -143,6 +144,8 @@ def validate_graph(graph: Graph, mode: ValidationMode) -> dict[str, Any]:
             start_nodes.append(node)
         if node_type == "end":
             end_nodes.append(node)
+        if node_type == "output":
+            output_nodes.append(node)
         if mode in {"publish", "run"} and node.get("enabled") is False:
             errors.append(
                 _issue(
@@ -158,6 +161,16 @@ def validate_graph(graph: Graph, mode: ValidationMode) -> dict[str, Any]:
             _validate_api_node_config(node, path, errors)
         if mode in {"publish", "run"} and node_type == "set_variable":
             _validate_set_variable_node_config(node, path, errors)
+        if mode in {"publish", "run"} and node_type == "output":
+            _validate_final_output_config(
+                node,
+                path,
+                errors,
+                node_label="Output Node",
+                missing_code="missing_output_outputs",
+                missing_message="Output Node 必须配置 outputs 对象",
+                missing_template_code="missing_output_template",
+            )
         if mode in {"publish", "run"} and node_type == "human_approval":
             _validate_human_approval_node_config(node, path, errors)
 
@@ -199,6 +212,20 @@ def validate_graph(graph: Graph, mode: ValidationMode) -> dict[str, Any]:
             errors.append(
                 _issue("invalid_end_node_count", "工作流必须且只能有一个 End Node", "nodes")
             )
+        if len(end_nodes) == 1:
+            end_node = end_nodes[0]
+            end_config = end_node.get("config") if isinstance(end_node.get("config"), dict) else {}
+            end_has_final_output = _has_final_output_config(end_config)
+            if not output_nodes or end_has_final_output:
+                _validate_final_output_config(
+                    end_node,
+                    node_path_by_id[end_node["id"]],
+                    errors,
+                    node_label="End Node",
+                    missing_code="missing_end_outputs",
+                    missing_message="End Node 必须配置 outputs 对象；旧 Output Node 工作流除外",
+                    missing_template_code="missing_end_template",
+                )
 
         for node_id, node in node_by_id.items():
             node_type = node.get("type")
@@ -463,6 +490,52 @@ def _validate_set_variable_node_config(
             node_id,
         )
     )
+
+
+def _has_final_output_config(config: dict[str, Any]) -> bool:
+    return bool(config.get("response_mode") or config.get("outputs") or config.get("template"))
+
+
+def _validate_final_output_config(
+    node: dict[str, Any],
+    path: str,
+    errors: list[dict[str, Any]],
+    *,
+    node_label: str,
+    missing_code: str,
+    missing_message: str,
+    missing_template_code: str,
+) -> None:
+    node_id = node.get("id")
+    config = node.get("config") if isinstance(node.get("config"), dict) else {}
+    mode = str(config.get("response_mode") or "parameters").strip().lower()
+    if mode not in {"parameters", "template"}:
+        errors.append(
+            _issue(
+                "invalid_final_output_response_mode",
+                f"{node_label} response_mode 必须是 parameters 或 template",
+                f"{path}.config.response_mode",
+                node_id,
+            )
+        )
+    if not isinstance(config.get("outputs"), dict):
+        errors.append(
+            _issue(
+                missing_code,
+                missing_message,
+                f"{path}.config.outputs",
+                node_id,
+            )
+        )
+    if mode == "template" and not str(config.get("template") or "").strip():
+        errors.append(
+            _issue(
+                missing_template_code,
+                f"{node_label} 模板模式必须配置 template",
+                f"{path}.config.template",
+                node_id,
+            )
+        )
 
 
 def _validate_human_approval_node_config(

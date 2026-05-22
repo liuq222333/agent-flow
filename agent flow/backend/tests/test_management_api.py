@@ -5,12 +5,14 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.datastructures import Headers, UploadFile
 
+from app.api.v1 import models as model_api
 from app.api.v1 import secrets as secret_api
 from app.api.v1 import tools as tool_api
 from app.api.v1.knowledge import _normalize_knowledge_config, _validate_uploaded_file, rank_chunks
 from app.api.v1.schemas import CreateSecretRequest, UpdateSecretRequest
 from app.api.v1.secrets import decrypt_secret_value, encrypt_secret_value, sanitize_secret_row
 from app.api.v1.tools import mock_tool_test_result
+from app.core.config import Settings
 from app.main import app
 
 
@@ -45,6 +47,14 @@ class _FakeResult:
 
     def mappings(self):
         return _ResultMappings(self.rows)
+
+    def scalar_one_or_none(self):
+        if not self.rows:
+            return None
+        row = self.rows[0]
+        if isinstance(row, dict):
+            return next(iter(row.values()))
+        return row
 
 
 class _SecretApiConnection:
@@ -126,6 +136,35 @@ class _SecretApiEngine:
         return _AsyncContext(self.conn)
 
 
+class _ModelApiConnection:
+    def __init__(self, secret_exists: bool = False):
+        self.secret_exists = secret_exists
+        self.calls = []
+
+    async def execute(self, statement, params=None):
+        sql = str(statement)
+        params = params or {}
+        self.calls.append((sql, params))
+        if "FROM model_providers" in sql:
+            return _FakeResult(
+                [
+                    {
+                        "id": 7,
+                        "name": "deepseek",
+                        "provider_type": "deepseek",
+                        "base_url": None,
+                        "status": "active",
+                        "config_json": {"api_key_secret": "deepseek_api_key"},
+                        "created_at": "2026-05-20T00:00:00Z",
+                        "updated_at": "2026-05-20T00:00:00Z",
+                    }
+                ]
+            )
+        if "FROM secrets" in sql:
+            return _FakeResult([{"exists": 1}] if self.secret_exists else [])
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
 def test_management_routes_are_registered() -> None:
     client = TestClient(app)
 
@@ -139,11 +178,72 @@ def test_management_routes_are_registered() -> None:
     assert "/api/v1/secrets" in openapi["paths"]
     assert "post" in openapi["paths"]["/api/v1/model-configs"]
     assert "put" in openapi["paths"]["/api/v1/model-configs/{model_config_id}"]
+    assert "/api/v1/model-defaults" in openapi["paths"]
     assert "/api/v1/workflow-versions/{version_id}/code" in openapi["paths"]
     assert "/api/v1/workflow-versions/{version_id}/regenerate-code" in openapi["paths"]
     assert "/api/v1/generated-workflows/cleanup" in openapi["paths"]
     assert "/api/v1/runs/{run_id}/retry" in openapi["paths"]
     assert "/api/v1/metrics" in openapi["paths"]
+
+
+@pytest.mark.asyncio
+async def test_model_defaults_are_configurable(monkeypatch) -> None:
+    monkeypatch.setattr(
+        model_api,
+        "get_settings",
+        lambda: Settings(
+            deepseek_base_url="https://deepseek.example.test",
+            deepseek_default_model="deepseek-custom-flash",
+            deepseek_default_context_window=128000,
+            deepseek_api_key_secret="custom_deepseek_key",
+        ),
+    )
+
+    defaults = await model_api.model_defaults()
+
+    assert defaults["deepseek"]["base_url"] == "https://deepseek.example.test"
+    assert defaults["deepseek"]["model_name"] == "deepseek-custom-flash"
+    assert defaults["deepseek"]["context_window"] == 128000
+    assert defaults["deepseek"]["api_key_secret"] == "custom_deepseek_key"
+    assert defaults["deepseek"]["default_config"]["api_model_alias"] == "deepseek-custom-flash"
+
+
+@pytest.mark.asyncio
+async def test_model_provider_diagnostic_reports_env_key_without_leaking_value(monkeypatch) -> None:
+    conn = _ModelApiConnection()
+    monkeypatch.setattr(model_api, "engine", _SecretApiEngine(conn))
+    monkeypatch.setattr(
+        model_api,
+        "get_settings",
+        lambda: Settings(deepseek_api_key="real-deepseek-key"),
+    )
+
+    result = await model_api.list_model_providers()
+
+    diagnostic = result["items"][0]["diagnostic"]
+    assert diagnostic["status"] == "ready"
+    assert diagnostic["api_key_available"] is True
+    assert diagnostic["api_key_source"] == "env"
+    assert diagnostic["api_key_env"] == "DEEPSEEK_API_KEY"
+    assert "real-deepseek-key" not in str(result)
+    assert all("FROM secrets" not in sql for sql, _ in conn.calls)
+
+
+@pytest.mark.asyncio
+async def test_model_provider_diagnostic_reports_missing_key_without_network(monkeypatch) -> None:
+    conn = _ModelApiConnection(secret_exists=False)
+    monkeypatch.setattr(model_api, "engine", _SecretApiEngine(conn))
+    monkeypatch.setattr(model_api, "get_settings", lambda: Settings(deepseek_api_key=None))
+
+    result = await model_api.list_model_providers()
+
+    diagnostic = result["items"][0]["diagnostic"]
+    assert diagnostic["status"] == "missing_api_key"
+    assert diagnostic["api_key_available"] is False
+    assert diagnostic["api_key_source"] == "none"
+    assert diagnostic["api_key_secret"] == "deepseek_api_key"
+    assert diagnostic["base_url_effective"] == "https://api.deepseek.com"
+    assert any("FROM secrets" in sql for sql, _ in conn.calls)
 
 
 def test_secret_helpers_encrypt_and_hide_value() -> None:

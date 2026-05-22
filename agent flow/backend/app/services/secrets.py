@@ -28,10 +28,13 @@ async def get_secret_value(conn, secret_key: str) -> str | None:
 
 
 async def resolve_openai_api_key(conn, provider_config: dict[str, Any] | None = None) -> str | None:
-    settings_key = get_settings().openai_api_key
+    settings = get_settings()
+    settings_key = settings.openai_api_key
     if settings_key:
         return settings_key
-    secret_key = str((provider_config or {}).get("api_key_secret") or "openai_api_key")
+    secret_key = str(
+        (provider_config or {}).get("api_key_secret") or settings.openai_api_key_secret
+    )
     return await get_secret_value(conn, secret_key)
 
 
@@ -39,8 +42,11 @@ async def resolve_deepseek_api_key(
     conn,
     provider_config: dict[str, Any] | None = None,
 ) -> str | None:
-    settings_key = get_settings().deepseek_api_key
+    settings = get_settings()
+    settings_key = settings.deepseek_api_key
     if settings_key:
         return settings_key
-    secret_key = str((provider_config or {}).get("api_key_secret") or "deepseek_api_key")
+    secret_key = str(
+        (provider_config or {}).get("api_key_secret") or settings.deepseek_api_key_secret
+    )
     return await get_secret_value(conn, secret_key)

@@ -2,7 +2,7 @@
 
 本文档记录第二阶段已完成开发内容和当前实现契约，用于同步代码、接口、错误码、测试验收和后续开发任务。
 
-同步时间：2026-05-19
+同步时间：2026-05-20
 
 ## 1. 本轮已完成范围
 
@@ -18,6 +18,8 @@
 - Human Approval 当前运行面板 approve/reject 操作。
 - Human Approval 最小审批中心。
 - 前端 Trace 错误提示映射。
+- 工作流主线体验增强：DeepSeek 问答模板、版本代码产物状态、Run 代码状态、Trace 中文 code metadata。
+- 核心工作流 Smoke：`scripts/smoke-workflow-core.ps1`。
 
 未覆盖：
 
@@ -312,6 +314,33 @@ POST /api/v1/ops/workflow_runs/{run_id}/recover
 
 ## 7. 新增节点契约同步
 
+### 7.0 普通 Agent 节点协议 v1
+
+本轮新增普通 Agent 工作流节点协议文档：
+
+```text
+开发文档/v1/SECOND_STAGE_NODE_PROTOCOL_v1.md
+```
+
+该文档把以下节点统一纳入 v1 协议：
+
+```text
+start
+input
+llm
+intent
+branch
+api
+message
+set_variable
+output
+end
+```
+
+已明确每类节点的 `type`、`config`、`input_mapping`、`output_mapping`、runtime output、Trace metadata 和稳定 error code。
+
+新增节点准入要求同步固化为：必须有 schema、前端配置、Runtime executor、node_run Trace、稳定错误码，以及单元测试或 smoke 覆盖最小可运行路径。
+
 ### 7.1 Set Variable Node
 
 本轮新增首个第二阶段扩展节点：
@@ -331,9 +360,9 @@ set_variable
 ```json
 {
   "assignments": {
-    "normalized_query": "{{input.user_query}}",
+    "normalized_query": "{{input.rawQuery}}",
     "customer.id": "{{input.customer_id}}",
-    "variables.answer": "{{outputs.llm_1.answer}}"
+    "variables.output": "{{outputs.llm_1.output}}"
   }
 }
 ```
@@ -343,7 +372,7 @@ set_variable
 ```json
 {
   "assignments": [
-    { "name": "normalized_query", "value": "{{input.user_query}}" },
+    { "name": "normalized_query", "value": "{{input.rawQuery}}" },
     { "target": "variables.customer.id", "value": "{{input.customer_id}}" }
   ]
 }
@@ -386,6 +415,39 @@ set_variable
 | 错误码 | 触发条件 |
 | --- | --- |
 | `invalid_config` | assignments 不是对象/数组，或数组项缺少 name/target |
+
+### 7.1.1 三段式 Start / LLM / End 主线
+
+本轮主线从五段式 `start -> input -> llm -> output -> end` 调整为三段式 `start -> llm -> end`。
+
+- `start.config.fields` 声明运行输入，默认主输入为 `rawQuery`，运行时输出可通过 `{{outputs.start_1.rawQuery}}` 引用。
+- `llm` 默认通过 `input_mapping.query = "{{input.rawQuery}}"` 获取用户输入，runtime output 以 `output` 为主字段，同时保留 `answer` 兼容旧图。
+- `end.config` 负责最终返回，支持原 `output` 节点的 `response_mode`、`outputs`、`template`、`output_value_kinds`。
+- 历史 `input` / `output` 节点保留运行兼容，但新模板和节点库不再作为主线推荐。
+
+`end.config` 示例：
+
+```json
+{
+  "response_mode": "parameters",
+  "outputs": {
+    "output": "{{outputs.llm_1.output}}",
+    "rawQuery": "{{outputs.start_1.rawQuery}}"
+  },
+  "template": "",
+  "output_value_kinds": {
+    "output": "reference",
+    "rawQuery": "reference"
+  }
+}
+```
+
+运行行为：
+
+- `response_mode` 缺省为 `parameters`，直接将解析后的 `outputs` 对象写入 `state.final_output`。
+- `template` 模式先解析 `outputs`，再允许模板用 `{{output}}`、`{{intent}}` 这类参数名渲染，最终返回 `{ "output": "..." }`。
+- 前端结束节点配置面板只展示上游节点输出、运行变量、系统输入和消息作为可选引用。
+- 若旧图仍包含 `output` 节点，空 `end.config = {}` 继续作为兼容终止节点。
 
 ### 7.2 API Node 配置增强
 
@@ -505,6 +567,12 @@ POST /api/v1/human-approval-tasks/{task_id}/cancel
 - Submit API 返回中记录 `resume_supported=true`、`resume_enqueued=true`。
 - `scripts/migrate-db.ps1` 已加入 `006_human_approval_tasks.sql` 和 `007_human_approval_node_status.sql`，并兼容读取已归档到 `开发文档/v0` 的旧迁移文件。
 
+边界说明：
+
+- Human Approval 当前标记为 MVP 完成。
+- 第二阶段后续暂停扩展审批权限、多人审批、超时通知和复杂审批流。
+- 新增节点工作优先回到普通 Agent 节点，按 `SECOND_STAGE_NODE_PROTOCOL_v1.md` 的准入清单执行。
+
 ## 8. 当前测试基线
 
 本轮同步对应的验证结果：
@@ -537,18 +605,23 @@ npm run build
 
 | 模块 | 状态 | 说明 |
 | --- | --- | --- |
-| R1 版本与代码产物体验 | 部分完成 | 已有版本/代码展示和 Trace code metadata，后续可继续打磨 UI |
+| R1 版本与代码产物体验 | 已完成主线增强 | 已有版本/代码展示、Run 代码状态、Trace 中文 code metadata，原始 path/hash 已收进调试详情 |
 | R2 Runtime 模块拆分 | 已完成第一轮 | generated workflow 加载已拆到 `generated_runtime.py` |
 | R3 Ops 恢复闭环 | 已完成第一轮 | 失败列表、dead queue、单条恢复、队列恢复已具备 |
 | R4 安全最小闭环 | 已完成第一轮 | Secret 脱敏、路径边界、模型错误脱敏已有测试 |
 | R5 DeepSeek 产品化 | 已完成第一轮 | 默认模型、稳定错误码、metadata、脱敏已具备 |
-| R6 新增节点能力 | 已完成第六轮 | 已新增 `set_variable` 节点、API Node 小步生产化配置、Human Approval 最小暂停/恢复契约、运行面板审批操作和最小审批中心 |
-| R8 文档同步 | 进行中 | 本文档为第一轮实现同步 |
+| R6 新增节点能力 | 已完成第六轮，审批暂停扩展 | 已新增 `set_variable` 节点、API Node 小步生产化配置、Human Approval 最小暂停/恢复契约、运行面板审批操作和最小审批中心；普通 Agent 节点协议已沉淀为 v1；后续暂不扩展审批权限、超时和通知 |
+| R7 测试验收 | 已补主线 Smoke | 新增核心 workflow smoke，覆盖模板发布、生成代码读取、运行和 Trace code metadata |
+| R8 文档同步 | 已同步本轮主线 | 本文档同步工作流主线增强状态；新增 `SECOND_STAGE_NODE_PROTOCOL_v1.md`；OpenAPI v0 已包含 generated workflow 字段与错误码 |
 
 ## 10. 后续文档待补
 
 本轮已同步：
 
+- `开发文档/v1/SECOND_STAGE_NODE_PROTOCOL_v1.md`
+  - 明确 Start/Input/LLM/Intent/Branch/API/Message/Set Variable/Output/End 的节点协议
+  - 固化 schema、前端配置、Runtime executor、Trace、测试或 smoke 的新增节点准入门槛
+  - 标记 Human Approval MVP 完成并暂停扩展
 - `开发文档/v0/openapi_agent_workflow_platform_mvp_v1.yaml`
   - 新增 `GET /ops/workflow_runs/failed`
   - 新增 `POST /ops/workflow_runs/{run_id}/recover`
@@ -557,10 +630,9 @@ npm run build
 
 建议下一步继续补：
 
-- Runtime 细节文档补 `generated_runtime.py` 模块职责。
-- API 设计文档补 `workflow_runs/{run_id}/recover`。
-- Testing 文档补 118 个后端测试和前端 build 验收基线。
-- Node Protocol 文档准备 R6 新节点协议。
+- Runtime 细节文档继续补充 `generated_runtime.py` 和节点 executor 边界。
+- Testing 文档补核心 workflow smoke、前端 lint/typecheck/build 和 Docker 验收路径。
+- Node Protocol 后续只在新增普通节点时增量扩展；审批节点保持 MVP 后再评估。
 
 ## 11. 结论
 
@@ -568,6 +640,6 @@ npm run build
 
 下一步建议优先级：
 
-1. 补 OpenAPI / API 设计文档。
-2. 继续推进 R6 新增节点协议，下一轮可评估 Human Approval 权限/超时处理或 HTTP Node 增强。
-3. 针对版本代码面板和审批面板继续做 UI 验收和轻量优化。
+1. 继续验收普通 Agent 工作流主线：模板创建、发布、运行、Trace、错误提示。
+2. 继续推进 R6 普通节点协议，可优先评估 HTTP/API Node 增强或 Code Transform Node。
+3. DeepSeek 真实调用保持可选验收，自动化测试继续走 mock/deterministic 路径。

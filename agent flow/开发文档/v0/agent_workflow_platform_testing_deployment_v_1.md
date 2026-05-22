@@ -397,20 +397,20 @@ Redis，RQ 队列依赖
 
 ```powershell
 cd "D:\xm\agent flow\agent flow"
-npm run check:local
+.\scripts\check-acceptance.ps1
 npm run compose:up
 npm run compose:ps
-npm run smoke:e2e
+.\scripts\smoke-e2e.ps1
 npm run compose:down
 ```
 
 命令说明：
 
 ```text
-npm run check:local    本地工具链、环境和基础检查入口
+.\scripts\check-acceptance.ps1    本地工具链、环境和基础检查入口
 npm run compose:up     启动 PostgreSQL、Redis、API、Frontend、workflow worker、document worker，并执行幂等 migration
 npm run compose:ps     查看 Compose 服务状态
-npm run smoke:e2e      跑端到端冒烟，覆盖 generated workflow、sync/async、Knowledge、Intent/Branch、API/Message
+.\scripts\smoke-e2e.ps1      跑端到端冒烟，覆盖 generated workflow、sync/async、Knowledge、Intent/Branch、API/Message
 npm run compose:down   停止 Compose 环境
 ```
 
@@ -750,7 +750,7 @@ Health / ready
 - ready checks 中 database / redis / encryption_key / default_model_provider 均为 ok
 
 Smoke
-- 部署后执行 npm run smoke:e2e 或等价环境 smoke
+- 部署后执行 .\scripts\smoke-e2e.ps1 或等价环境 smoke
 - 覆盖 generated workflow、sync/async、Knowledge、Intent/Branch、API/Message、Trace 脱敏
 
 Backup
@@ -808,10 +808,10 @@ API Tool Test 可运行
 当前自动化 / 半自动化验收入口：
 
 ```text
-npm run check:local
+.\scripts\check-acceptance.ps1
 npm run compose:up
 npm run compose:ps
-npm run smoke:e2e
+.\scripts\smoke-e2e.ps1
 npm run compose:down
 ```
 

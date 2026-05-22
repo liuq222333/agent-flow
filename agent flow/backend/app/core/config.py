@@ -16,7 +16,12 @@ class Settings(BaseSettings):
     api_bearer_token: str | None = None
     default_model_provider: str = "deepseek"
     openai_api_key: str | None = None
+    openai_api_key_secret: str = "openai_api_key"
     deepseek_api_key: str | None = None
+    deepseek_api_key_secret: str = "deepseek_api_key"
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_default_model: str = "deepseek-v4-flash"
+    deepseek_default_context_window: int = 1_000_000
     max_upload_bytes: int = 10 * 1024 * 1024
     allowed_upload_content_types: str = (
         "text/plain,text/markdown,application/pdf,"

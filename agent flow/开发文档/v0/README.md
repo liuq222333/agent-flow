@@ -47,7 +47,7 @@ cd "D:\xm\agent flow\agent flow"
 .\scripts\check-env.ps1
 npm run compose:up
 npm run compose:ps
-npm run smoke:e2e
+.\scripts\smoke-e2e.ps1
 npm run compose:down
 ```
 
@@ -92,7 +92,7 @@ npm run dev -- --hostname 0.0.0.0 --port 3000
 
 ```powershell
 cd "D:\xm\agent flow\agent flow"
-npm run check:local
+.\scripts\check-acceptance.ps1
 ```
 
 容器内检查：
@@ -151,7 +151,7 @@ Docker / 端口验收时请同时确认 Docker Desktop 已启动、`docker compo
 - Worker：`worker-workflow` 和 `worker-document` 均独立运行；异步工作流和文档处理不会长期停留在 `pending`。
 - Ops：前端 Ops 页面和 `/api/v1/ops/*` 已支持 workflow/document worker 心跳、Redis 队列积压、dead-letter 查看和恢复动作；document worker 处理详情仍通过 `docker compose logs worker-document` 和文档任务状态验证。
 - Health / ready：`/api/v1/health` 返回 `ok`，`/api/v1/ready` 返回 `ready`，并检查 database、redis、encryption_key、default_model_provider。
-- Smoke：部署后执行 `npm run smoke:e2e` 或等价脚本，覆盖 generated workflow、sync/async、Knowledge、Intent/Branch、API/Message 和 trace 脱敏。
+- Smoke：部署后执行 `.\scripts\smoke-e2e.ps1` 或等价脚本，覆盖 generated workflow、sync/async、Knowledge、Intent/Branch、API/Message 和 trace 脱敏。
 - Backup：发布前备份 PostgreSQL；确认上传文件目录或对象存储已有备份策略；记录当前镜像 tag、migration 版本和 `.env` 变更。
 - Logs：确认 API、workflow worker、document worker、PostgreSQL、Redis 日志可查看；生产环境应接入集中日志，但当前仓库只提供应用日志输出。
 - Rollback：前端回滚到上一构建，后端和 worker 回滚到上一镜像；数据库变更优先向前兼容，回滚前先恢复或保全数据备份。
@@ -172,15 +172,15 @@ Docker / 端口验收时请同时确认 Docker Desktop 已启动、`docker compo
 - 知识库与文档：`/api/v1/knowledge-bases`、`/api/v1/documents/{document_id}`
 - API 工具：`/api/v1/tools`
 - Secret 元数据：`/api/v1/secrets`
-- 模型配置：`/api/v1/model-providers`、`/api/v1/model-configs`
+- 模型配置：`/api/v1/model-providers`、`/api/v1/model-configs`、`/api/v1/model-defaults`
 
 Runtime 当前使用本地 generated workflow 执行模式：发布工作流时生成版本化 Python 代码，运行时 import 对应版本的本地代码执行，并真实写入 `workflow_runs` 和 `node_runs`。同步运行直接在 API 内执行；异步运行会创建 pending run 并通过 Redis list 交给 `worker-workflow` 执行。
 
 前端控制台目前包含 Workflow / Knowledge / Tools / Secrets / Models / Ops 六个入口。Workflow 编辑器支持节点库、连线同步、节点 JSON 配置、发布、同步/异步运行和 trace 定位。Trace 面板支持查看 code metadata，并可展开每个节点的 input、output、error 和 metadata。Knowledge 可以创建知识库、上传文档、重试/删除文档，并由 `worker-document` 解析为 chunks 后检索。Tools 支持创建、编辑和测试 API tool；Secrets 支持创建与更新，但列表只展示脱敏元数据；Ops 支持查看 workflow/document worker 心跳、workflow run 队列、dead-letter 和恢复动作。
 
-当前 LLM Node 默认使用 DeepSeek 配置项：`provider=deepseek`、`model=deepseek-v4-flash`，界面展示为 DeepSeek V4-Flash；运行时会使用 `DEEPSEEK_API_KEY` 或 active secret `deepseek_api_key` 通过 `https://api.deepseek.com` 调用 OpenAI-compatible Chat Completions。DeepSeek 默认以 `thinking_mode=false` 调用，后续可在节点配置中显式开启。缺少 key 时 DeepSeek 节点会明确失败。保留 `provider=mock` 本地模拟模式；如果节点配置 `provider=openai`，运行时会使用 `OPENAI_API_KEY` 或 active secret `openai_api_key` 调用 OpenAI。Intent Node 支持本地关键词分类，也可以配置 OpenAI 分类。API Node 默认使用安全 mock 模式，`mode=http` 仅允许公共 HTTP/HTTPS 地址，会阻止 localhost、private network、link-local 等目标。Knowledge Base Node 会优先使用 `knowledge_chunks.embedding` 走 pgvector cosine 检索；没有向量或向量检索不可用时自动回退到关键词检索。默认 `local-hash` / `local-embedding` 模式可离线生成 1536 维向量，配置 `embedding_provider=openai` 时会使用 OpenAI embedding。
+当前 LLM Node 默认使用 DeepSeek 配置项：`provider=deepseek`、`model=deepseek-v4-flash`，界面展示为 DeepSeek V4-Flash；可通过 `DEEPSEEK_DEFAULT_MODEL`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_DEFAULT_CONTEXT_WINDOW` 和 `DEEPSEEK_API_KEY_SECRET` 调整默认模型、地址、上下文窗口和 Secret 引用。运行时会使用 `DEEPSEEK_API_KEY` 或 active secret `deepseek_api_key` 通过 `https://api.deepseek.com` 调用 OpenAI-compatible Chat Completions。Models 页面会展示 API Key 来源和可用性诊断，该诊断只检查 env/Secret 配置，不请求真实 DeepSeek。DeepSeek 默认以 `thinking_mode=false` 调用，后续可在节点配置中显式开启。缺少 key 时 DeepSeek 节点会明确失败。保留 `provider=mock` 本地模拟模式；如果节点配置 `provider=openai`，运行时会使用 `OPENAI_API_KEY` 或 active secret `openai_api_key` 调用 OpenAI。Intent Node 支持本地关键词分类，也可以配置 OpenAI 分类。API Node 默认使用安全 mock 模式，`mode=http` 仅允许公共 HTTP/HTTPS 地址，会阻止 localhost、private network、link-local 等目标。Knowledge Base Node 会优先使用 `knowledge_chunks.embedding` 走 pgvector cosine 检索；没有向量或向量检索不可用时自动回退到关键词检索。默认 `local-hash` / `local-embedding` 模式可离线生成 1536 维向量，配置 `embedding_provider=openai` 时会使用 OpenAI embedding。
 
-`npm run smoke:e2e` 会创建测试知识库、上传文档、验证 vector retrieve、发布 generated workflow code，并分别跑同步/异步工作流、Knowledge Runtime、Intent + Branch、API + Message 工作流；其中 API smoke 会验证变量映射、Message/最终输出和敏感 header trace 脱敏，适合作为每轮开发后的回归验收。
+`.\scripts\smoke-e2e.ps1` 会创建测试知识库、上传文档、验证 vector retrieve、发布 generated workflow code，并分别跑同步/异步工作流、Knowledge Runtime、Intent + Branch、API + Message 工作流；其中 API smoke 会验证变量映射、Message/最终输出和敏感 header trace 脱敏，适合作为每轮开发后的回归验收。
 
 如果前端临时使用 `3001` 等非默认端口，请在 `.env` 中调整 `CORS_ALLOWED_ORIGINS`。默认已经放行 `http://localhost:3000`、`http://127.0.0.1:3000`、`http://localhost:3001` 和 `http://127.0.0.1:3001`。
 

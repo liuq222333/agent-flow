@@ -53,7 +53,7 @@ def test_publish_rejects_start_incoming_edge() -> None:
 
 def test_publish_rejects_end_outgoing_edge() -> None:
     graph = deepcopy(default_graph())
-    graph["edges"].append({"id": "e5", "source": "end_1", "target": "output_1"})
+    graph["edges"].append({"id": "e5", "source": "end_1", "target": "llm_1"})
 
     result = validate_graph(graph, "publish")
 
@@ -63,7 +63,7 @@ def test_publish_rejects_end_outgoing_edge() -> None:
 
 def test_publish_rejects_multiple_outgoing_edges_from_non_branch() -> None:
     graph = deepcopy(default_graph())
-    graph["edges"].append({"id": "e5", "source": "input_1", "target": "output_1"})
+    graph["edges"].append({"id": "e5", "source": "llm_1", "target": "start_1"})
 
     result = validate_graph(graph, "publish")
 
@@ -113,15 +113,13 @@ def test_publish_accepts_set_variable_node_with_assignments() -> None:
             "type": "set_variable",
             "name": "变量赋值",
             "position": {"x": 620, "y": 160},
-            "config": {"assignments": {"normalized_query": "{{input.user_query}}"}},
+            "config": {"assignments": {"normalized_query": "{{input.rawQuery}}"}},
         },
     )
     graph["edges"] = [
-        {"id": "e1", "source": "start_1", "target": "input_1"},
-        {"id": "e2", "source": "input_1", "target": "llm_1"},
-        {"id": "e3", "source": "llm_1", "target": "set_1"},
-        {"id": "e4", "source": "set_1", "target": "output_1"},
-        {"id": "e5", "source": "output_1", "target": "end_1"},
+        {"id": "e1", "source": "start_1", "target": "llm_1"},
+        {"id": "e2", "source": "llm_1", "target": "set_1"},
+        {"id": "e3", "source": "set_1", "target": "end_1"},
     ]
 
     result = validate_graph(graph, "publish")
@@ -142,11 +140,9 @@ def test_publish_accepts_human_approval_node_with_title() -> None:
         },
     )
     graph["edges"] = [
-        {"id": "e1", "source": "start_1", "target": "input_1"},
-        {"id": "e2", "source": "input_1", "target": "llm_1"},
-        {"id": "e3", "source": "llm_1", "target": "approval_1"},
-        {"id": "e4", "source": "approval_1", "target": "output_1"},
-        {"id": "e5", "source": "output_1", "target": "end_1"},
+        {"id": "e1", "source": "start_1", "target": "llm_1"},
+        {"id": "e2", "source": "llm_1", "target": "approval_1"},
+        {"id": "e3", "source": "approval_1", "target": "end_1"},
     ]
 
     result = validate_graph(graph, "publish")
@@ -165,8 +161,11 @@ def test_publish_rejects_human_approval_node_without_title() -> None:
             "config": {"timeout_seconds": 3600},
         }
     )
-    graph["edges"].append({"id": "e5", "source": "llm_1", "target": "approval_1"})
-    graph["edges"][2] = {"id": "e3", "source": "approval_1", "target": "output_1"}
+    graph["edges"] = [
+        {"id": "e1", "source": "start_1", "target": "llm_1"},
+        {"id": "e2", "source": "llm_1", "target": "approval_1"},
+        {"id": "e3", "source": "approval_1", "target": "end_1"},
+    ]
 
     result = validate_graph(graph, "publish")
 
@@ -185,8 +184,11 @@ def test_publish_rejects_human_approval_node_with_invalid_timeout() -> None:
             "config": {"title": "退款审批", "timeout_seconds": 0},
         }
     )
-    graph["edges"].append({"id": "e5", "source": "llm_1", "target": "approval_1"})
-    graph["edges"][2] = {"id": "e3", "source": "approval_1", "target": "output_1"}
+    graph["edges"] = [
+        {"id": "e1", "source": "start_1", "target": "llm_1"},
+        {"id": "e2", "source": "llm_1", "target": "approval_1"},
+        {"id": "e3", "source": "approval_1", "target": "end_1"},
+    ]
 
     result = validate_graph(graph, "publish")
 
@@ -205,13 +207,80 @@ def test_publish_rejects_set_variable_node_without_assignments() -> None:
             "config": {},
         }
     )
-    graph["edges"].append({"id": "e5", "source": "llm_1", "target": "set_1"})
-    graph["edges"][2] = {"id": "e3", "source": "set_1", "target": "output_1"}
+    graph["edges"] = [
+        {"id": "e1", "source": "start_1", "target": "llm_1"},
+        {"id": "e2", "source": "llm_1", "target": "set_1"},
+        {"id": "e3", "source": "set_1", "target": "end_1"},
+    ]
 
     result = validate_graph(graph, "publish")
 
     assert result["valid"] is False
     assert any(error["code"] == "missing_set_variable_assignments" for error in result["errors"])
+
+
+def test_publish_rejects_output_node_without_outputs() -> None:
+    graph = _legacy_output_graph()
+    output_node = next(node for node in graph["nodes"] if node["type"] == "output")
+    output_node["config"] = {"response_mode": "parameters"}
+
+    result = validate_graph(graph, "publish")
+
+    assert result["valid"] is False
+    assert any(error["code"] == "missing_output_outputs" for error in result["errors"])
+
+
+def test_publish_rejects_output_template_mode_without_template() -> None:
+    graph = _legacy_output_graph()
+    output_node = next(node for node in graph["nodes"] if node["type"] == "output")
+    output_node["config"] = {
+        "response_mode": "template",
+        "outputs": {"answer": "{{variables.answer}}"},
+    }
+
+    result = validate_graph(graph, "publish")
+
+    assert result["valid"] is False
+    assert any(error["code"] == "missing_output_template" for error in result["errors"])
+
+
+def test_publish_accepts_output_template_mode_with_template() -> None:
+    graph = _legacy_output_graph()
+    output_node = next(node for node in graph["nodes"] if node["type"] == "output")
+    output_node["config"] = {
+        "response_mode": "template",
+        "outputs": {"answer": "{{variables.answer}}"},
+        "template": "回复：{{answer}}",
+    }
+
+    result = validate_graph(graph, "publish")
+
+    assert result["valid"] is True
+
+
+def test_publish_rejects_end_without_outputs_when_no_output_node() -> None:
+    graph = deepcopy(default_graph())
+    end_node = next(node for node in graph["nodes"] if node["type"] == "end")
+    end_node["config"] = {}
+
+    result = validate_graph(graph, "publish")
+
+    assert result["valid"] is False
+    assert any(error["code"] == "missing_end_outputs" for error in result["errors"])
+
+
+def test_publish_accepts_end_template_mode_with_template() -> None:
+    graph = deepcopy(default_graph())
+    end_node = next(node for node in graph["nodes"] if node["type"] == "end")
+    end_node["config"] = {
+        "response_mode": "template",
+        "outputs": {"output": "{{outputs.llm_1.output}}"},
+        "template": "回复：{{output}}",
+    }
+
+    result = validate_graph(graph, "publish")
+
+    assert result["valid"] is True
 
 
 def test_publish_rejects_api_node_with_invalid_response_limit() -> None:
@@ -230,11 +299,9 @@ def test_publish_rejects_api_node_with_invalid_response_limit() -> None:
     }
     graph["nodes"].insert(3, api_node)
     graph["edges"] = [
-        {"id": "e1", "source": "start_1", "target": "input_1"},
-        {"id": "e2", "source": "input_1", "target": "llm_1"},
-        {"id": "e3", "source": "llm_1", "target": "api_1"},
-        {"id": "e4", "source": "api_1", "target": "output_1"},
-        {"id": "e5", "source": "output_1", "target": "end_1"},
+        {"id": "e1", "source": "start_1", "target": "llm_1"},
+        {"id": "e2", "source": "llm_1", "target": "api_1"},
+        {"id": "e3", "source": "api_1", "target": "end_1"},
     ]
 
     result = validate_graph(graph, "publish")
@@ -318,3 +385,26 @@ def _branch_graph() -> dict:
             {"id": "e4", "source": "output_1", "target": "end_1"},
         ],
     }
+
+
+def _legacy_output_graph() -> dict:
+    graph = deepcopy(default_graph())
+    end_node = next(node for node in graph["nodes"] if node["type"] == "end")
+    end_node["position"] = {"x": 920, "y": 160}
+    end_node["config"] = {}
+    graph["nodes"].insert(
+        2,
+        {
+            "id": "output_1",
+            "type": "output",
+            "name": "最终输出",
+            "position": {"x": 640, "y": 160},
+            "config": {"outputs": {"output": "{{outputs.llm_1.output}}"}},
+        },
+    )
+    graph["edges"] = [
+        {"id": "e1", "source": "start_1", "target": "llm_1"},
+        {"id": "e2", "source": "llm_1", "target": "output_1"},
+        {"id": "e3", "source": "output_1", "target": "end_1"},
+    ]
+    return graph

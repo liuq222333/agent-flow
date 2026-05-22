@@ -4,6 +4,7 @@ import {
   Activity,
   Ban,
   BookOpen,
+  Bot,
   CheckCircle2,
   Database,
   EyeOff,
@@ -58,6 +59,7 @@ import {
 } from "./workflow-editor/constants";
 import {
   createApiMessageDemoGraph,
+  createDeepSeekQaDemoGraph,
   createIntentBranchDemoGraph,
   createKnowledgeDemoGraph,
 } from "./workflow-editor/demo-graphs";
@@ -88,6 +90,7 @@ import type {
   KnowledgeDocument,
   ModelConfig,
   ModelConfigDraft,
+  ModelDefaults,
   ModelProvider,
   ModelProviderDraft,
   NodeDragPreview,
@@ -116,7 +119,9 @@ import {
   fetchWithTimeout,
   findFlowNodeIdAtClientPoint,
   formatBytes,
+  formatCodeStatus,
   formatDate,
+  formatRuntimeError,
   getConnectionError,
   getDefaultNextNodeType,
   getNodeEdgePoint,
@@ -127,6 +132,7 @@ import {
   makeEdgeId,
   nodeChangeHasId,
   parseJsonObject,
+  shortHash,
   stringifyJson,
 } from "./workflow-editor/utils";
 
@@ -180,6 +186,55 @@ const readNumber = (record: JsonObject, keys: string[]) => {
   return 0;
 };
 
+const readApiErrorMessage = (data: unknown, fallback: string) => {
+  if (!data || typeof data !== "object") {
+    return fallback;
+  }
+  const detail = (data as { detail?: unknown }).detail;
+  if (typeof detail === "string") {
+    return detail;
+  }
+  if (detail && typeof detail === "object") {
+    const record = detail as { code?: unknown; message?: unknown };
+    if (typeof record.code === "string") {
+      return formatRuntimeError(record.code, typeof record.message === "string" ? record.message : null);
+    }
+    if (typeof record.message === "string") {
+      return record.message;
+    }
+  }
+  return fallback;
+};
+
+const modelProviderDiagnosticLabel = (status?: string | null) => {
+  if (status === "ready") {
+    return "可用";
+  }
+  if (status === "missing_api_key") {
+    return "缺少 API Key";
+  }
+  if (status === "disabled") {
+    return "已禁用";
+  }
+  if (status === "not_required") {
+    return "无需密钥";
+  }
+  return "未知";
+};
+
+const modelProviderKeySourceLabel = (source?: string | null) => {
+  if (source === "env") {
+    return "环境变量";
+  }
+  if (source === "secret") {
+    return "平台 Secret";
+  }
+  if (source === "not_required") {
+    return "无需密钥";
+  }
+  return "未配置";
+};
+
 const approvalStatusOptions: Array<HumanApprovalTaskStatus | "all"> = [
   "pending",
   "approved",
@@ -196,6 +251,28 @@ const approvalStatusLabels: Record<HumanApprovalTaskStatus | "all", string> = {
   cancelled: "已取消",
   expired: "已过期",
   all: "全部",
+};
+
+const defaultFinalOutputReference = (sourceNode: GraphNode) => {
+  if (sourceNode.type === "llm") {
+    return `{{outputs.${sourceNode.id}.output}}`;
+  }
+  if (sourceNode.type === "message") {
+    return `{{outputs.${sourceNode.id}.message}}`;
+  }
+  if (sourceNode.type === "api") {
+    return `{{outputs.${sourceNode.id}.response}}`;
+  }
+  if (sourceNode.type === "knowledge_base") {
+    return `{{outputs.${sourceNode.id}.chunks}}`;
+  }
+  if (sourceNode.type === "intent") {
+    return `{{outputs.${sourceNode.id}.intent}}`;
+  }
+  if (sourceNode.type === "start") {
+    return `{{outputs.${sourceNode.id}.rawQuery}}`;
+  }
+  return `{{outputs.${sourceNode.id}.output}}`;
 };
 
 export default function Home() {
@@ -278,6 +355,7 @@ export default function Home() {
   const [secretDrafts, setSecretDrafts] = useState<Record<number, SecretDraft>>({});
   const [modelProviders, setModelProviders] = useState<ModelProvider[]>([]);
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
+  const [modelDefaults, setModelDefaults] = useState<ModelDefaults | null>(null);
   const [modelProviderForm, setModelProviderForm] = useState({
     name: "deepseek",
     provider_type: "deepseek",
@@ -323,6 +401,21 @@ export default function Home() {
   const selectedVersion = selectedWorkflow?.current_version_id
     ? `v${currentVersionDetail?.version ?? selectedWorkflow.current_version ?? selectedWorkflow.current_version_id}`
     : "未发布";
+  const runVersionLabel = currentVersionDetail
+    ? `v${currentVersionDetail.version}`
+    : selectedWorkflow?.current_version_id
+      ? selectedVersion
+      : "未发布";
+  const runCodeStatus = currentVersionDetail
+    ? formatCodeStatus(currentVersionDetail.code_status, currentVersionDetail.code_path ? "已生成" : "未生成")
+    : selectedWorkflow?.current_version_id
+      ? "版本详情加载中"
+      : "未生成";
+  const runCodeModified = currentVersionDetail?.code_modified === true || currentVersionCode?.code_modified === true;
+  const runCodeHash = shortHash(
+    currentVersionCode?.code_hash_actual ?? currentVersionDetail?.code_hash_actual ?? currentVersionDetail?.code_hash,
+  );
+  const runCodePath = currentVersionCode?.code_path ?? currentVersionDetail?.code_path ?? null;
 
   const selectedNode = useMemo(
     () => graph.nodes.find((node) => node.id === selectedNodeId) ?? null,
@@ -521,6 +614,13 @@ export default function Home() {
         x: Math.round(sourceNode.position.x + 240),
         y: Math.round(sourceNode.position.y),
       });
+      if (nextNode.type === "end") {
+        nextNode.config = {
+          ...nextNode.config,
+          outputs: { output: defaultFinalOutputReference(sourceNode) },
+          output_value_kinds: { output: "reference" },
+        };
+      }
       const nextEdge: GraphEdge = {
         id: makeEdgeId(sourceNode.id, nextNode.id, graph.edges.length),
         source: sourceNode.id,
@@ -859,9 +959,10 @@ export default function Home() {
   const loadModels = useCallback(async () => {
     setBusyAction("models");
     try {
-      const [providersResponse, configsResponse] = await Promise.all([
+      const [providersResponse, configsResponse, defaultsResponse] = await Promise.all([
         fetchWithTimeout(`${apiBaseUrl}/model-providers`, { cache: "no-store" }),
         fetchWithTimeout(`${apiBaseUrl}/model-configs`, { cache: "no-store" }),
+        fetchWithTimeout(`${apiBaseUrl}/model-defaults`, { cache: "no-store" }),
       ]);
       if (!providersResponse.ok) {
         throw new Error(`GET /model-providers ${providersResponse.status}`);
@@ -869,15 +970,63 @@ export default function Home() {
       if (!configsResponse.ok) {
         throw new Error(`GET /model-configs ${configsResponse.status}`);
       }
+      if (!defaultsResponse.ok) {
+        throw new Error(`GET /model-defaults ${defaultsResponse.status}`);
+      }
       const providersData = await providersResponse.json();
       const configsData = await configsResponse.json();
+      const defaultsData = (await defaultsResponse.json()) as ModelDefaults;
       const providers = providersData.items as ModelProvider[];
       const configs = configsData.items as ModelConfig[];
       setModelProviders(providers);
       setModelConfigs(configs);
+      setModelDefaults(defaultsData);
       const deepseekProvider = providers.find((provider) => provider.name === "deepseek");
       setModelConfigForm((form) =>
-        form.provider_id || !deepseekProvider ? form : { ...form, provider_id: String(deepseekProvider.id) },
+        form.provider_id || !deepseekProvider
+          ? form
+          : {
+              ...form,
+              provider_id: String(deepseekProvider.id),
+              model_name:
+                form.model_name === "deepseek-v4-flash" || !form.model_name
+                  ? defaultsData.deepseek.model_name
+                  : form.model_name,
+              display_name:
+                form.display_name === "DeepSeek V4-Flash" || !form.display_name
+                  ? defaultsData.deepseek.display_name
+                  : form.display_name,
+              context_window:
+                form.context_window === "1000000" || !form.context_window
+                  ? String(defaultsData.deepseek.context_window)
+                  : form.context_window,
+              default_config:
+                form.default_config ===
+                  stringifyJson({
+                    temperature: 0.3,
+                    max_tokens: 1000,
+                    model_version: "DeepSeek-V4-Flash",
+                    api_model_alias: "deepseek-v4-flash",
+                    thinking_mode: false,
+                  }) || !form.default_config
+                  ? stringifyJson(defaultsData.deepseek.default_config)
+                  : form.default_config,
+            },
+      );
+      setModelProviderForm((form) =>
+        form.name === "deepseek" && form.provider_type === "deepseek"
+          ? {
+              ...form,
+              base_url:
+                form.base_url === "https://api.deepseek.com" || !form.base_url
+                  ? defaultsData.deepseek.base_url
+                  : form.base_url,
+              config:
+                form.config === stringifyJson({ api_key_secret: "deepseek_api_key" }) || !form.config
+                  ? stringifyJson({ api_key_secret: defaultsData.deepseek.api_key_secret })
+                  : form.config,
+            }
+          : form,
       );
       setModelProviderDrafts((currentDrafts) =>
         providers.reduce<Record<number, ModelProviderDraft>>((drafts, provider) => {
@@ -1531,14 +1680,14 @@ export default function Home() {
       });
       const result = await response.json();
       if (!response.ok) {
-        throw new Error(result.detail ?? `POST /model-providers ${response.status}`);
+        throw new Error(readApiErrorMessage(result, `POST /model-providers ${response.status}`));
       }
       setModelProviderForm({
-        name: "deepseek",
-        provider_type: "deepseek",
-        base_url: "https://api.deepseek.com",
+        name: modelDefaults?.deepseek.provider_name ?? "deepseek",
+        provider_type: modelDefaults?.deepseek.provider_type ?? "deepseek",
+        base_url: modelDefaults?.deepseek.base_url ?? "https://api.deepseek.com",
         status: "active",
-        config: stringifyJson({ api_key_secret: "deepseek_api_key" }),
+        config: stringifyJson({ api_key_secret: modelDefaults?.deepseek.api_key_secret ?? "deepseek_api_key" }),
       });
       setStatusLine(`已创建 Model Provider #${result.id}`);
       await loadModels();
@@ -1579,7 +1728,7 @@ export default function Home() {
       });
       const result = await response.json();
       if (!response.ok) {
-        throw new Error(result.detail ?? `PUT /model-providers/${providerId} ${response.status}`);
+        throw new Error(readApiErrorMessage(result, `PUT /model-providers/${providerId} ${response.status}`));
       }
       setStatusLine(`已更新 Model Provider #${providerId}`);
       await loadModels();
@@ -1623,20 +1772,22 @@ export default function Home() {
       });
       const result = await response.json();
       if (!response.ok) {
-        throw new Error(result.detail ?? `POST /model-configs ${response.status}`);
+        throw new Error(readApiErrorMessage(result, `POST /model-configs ${response.status}`));
       }
       setModelConfigForm((form) => ({
         ...form,
-        model_name: "deepseek-v4-flash",
-        display_name: "DeepSeek V4-Flash",
-        context_window: "1000000",
-        default_config: stringifyJson({
-          temperature: 0.3,
-          max_tokens: 1000,
-          model_version: "DeepSeek-V4-Flash",
-          api_model_alias: "deepseek-v4-flash",
-          thinking_mode: false,
-        }),
+        model_name: modelDefaults?.deepseek.model_name ?? "deepseek-v4-flash",
+        display_name: modelDefaults?.deepseek.display_name ?? "DeepSeek V4-Flash",
+        context_window: String(modelDefaults?.deepseek.context_window ?? 1000000),
+        default_config: stringifyJson(
+          modelDefaults?.deepseek.default_config ?? {
+            temperature: 0.3,
+            max_tokens: 1000,
+            model_version: "DeepSeek-V4-Flash",
+            api_model_alias: "deepseek-v4-flash",
+            thinking_mode: false,
+          },
+        ),
       }));
       setStatusLine(`已创建 Model Config #${result.id}`);
       await loadModels();
@@ -1688,7 +1839,7 @@ export default function Home() {
       });
       const result = await response.json();
       if (!response.ok) {
-        throw new Error(result.detail ?? `PUT /model-configs/${modelConfigId} ${response.status}`);
+        throw new Error(readApiErrorMessage(result, `PUT /model-configs/${modelConfigId} ${response.status}`));
       }
       setStatusLine(`已更新 Model Config #${modelConfigId}`);
       await loadModels();
@@ -1792,7 +1943,10 @@ export default function Home() {
       const nextTrace = (await traceResponse.json()) as RunTrace;
       setTrace(nextTrace);
       setInspectorTab(nextTrace.run.status === "waiting_approval" ? "run" : "trace");
-      setStatusLine(`已载入运行 #${runId} · ${nextTrace.run.status}`);
+      const runtimeHint = nextTrace.run.error_code
+        ? formatRuntimeError(nextTrace.run.error_code, nextTrace.run.error_message)
+        : null;
+      setStatusLine(runtimeHint ? `已载入运行 #${runId} · ${runtimeHint}` : `已载入运行 #${runId} · ${nextTrace.run.status}`);
       const firstFailedNode = nextTrace.nodes.find((node) => node.status === "failed");
       if (firstFailedNode) {
         focusNode(firstFailedNode.node_id);
@@ -2004,7 +2158,7 @@ export default function Home() {
         setValidation(result.detail as ValidationResult);
         throw new Error("发布校验未通过");
       }
-      setStatusLine(`已发布 v${result.version}`);
+      setStatusLine(`已发布 v${result.version}，可进入对话体验`);
       await loadWorkflows(selectedWorkflow.id);
       await loadWorkflow(selectedWorkflow.id);
       return true;
@@ -2337,7 +2491,7 @@ export default function Home() {
       });
       const result = await response.json();
       if (!response.ok) {
-        throw new Error(result.detail ?? `POST /run ${response.status}`);
+        throw new Error(readApiErrorMessage(result, `POST /run ${response.status}`));
       }
       if (runMode === "async") {
         setStatusLine(`异步运行已提交 #${result.run_id}，等待完成`);
@@ -2352,7 +2506,14 @@ export default function Home() {
       const nextTrace = (await traceResponse.json()) as RunTrace;
       setTrace(nextTrace);
       setInspectorTab(nextTrace.run.status === "waiting_approval" ? "run" : "trace");
-      setStatusLine(`${runMode === "async" ? "异步" : "同步"}运行完成 #${result.run_id} · ${nextTrace.run.status}`);
+      const runtimeHint = nextTrace.run.error_code
+        ? formatRuntimeError(nextTrace.run.error_code, nextTrace.run.error_message)
+        : null;
+      setStatusLine(
+        runtimeHint
+          ? `${runMode === "async" ? "异步" : "同步"}运行失败 #${result.run_id} · ${runtimeHint}`
+          : `${runMode === "async" ? "异步" : "同步"}运行完成 #${result.run_id} · ${nextTrace.run.status}`,
+      );
       const firstFailedNode = nextTrace.nodes.find((node) => node.status === "failed");
       if (firstFailedNode) {
         focusNode(firstFailedNode.node_id);
@@ -2497,6 +2658,26 @@ export default function Home() {
     [addNode],
   );
 
+  const applyDeepSeekQaDemoTemplate = useCallback(() => {
+    if (!selectedWorkflow) {
+      return;
+    }
+    if (
+      (graph.nodes.length > 0 || graph.edges.length > 0) &&
+      !window.confirm("DeepSeek 问答模板会替换当前画布草稿，是否继续？")
+    ) {
+      setStatusLine("已取消套用 DeepSeek 问答模板，当前草稿未改变");
+      return;
+    }
+
+    setGraph(createDeepSeekQaDemoGraph());
+    setSelectedNodeId("llm_1");
+    setRunInput(JSON.stringify({ rawQuery: "用三句话解释这个工作流平台的用途" }, null, 2));
+    setValidation(null);
+    setTrace(null);
+    setStatusLine("已生成 DeepSeek 问答草稿；存在 DEEPSEEK_API_KEY 时可真实调用，否则建议测试使用 mock 路径");
+  }, [graph.edges.length, graph.nodes.length, selectedWorkflow]);
+
   const applyKnowledgeDemoTemplate = useCallback(async () => {
     if (!selectedWorkflow) {
       return;
@@ -2533,7 +2714,7 @@ export default function Home() {
     const nextGraph = createKnowledgeDemoGraph(knowledgeBaseId);
     setGraph(nextGraph);
     setSelectedNodeId("kb_1");
-    setRunInput(JSON.stringify({ user_query: "refund billing policy" }, null, 2));
+    setRunInput(JSON.stringify({ rawQuery: "refund billing policy" }, null, 2));
     setValidation(null);
     setTrace(null);
     setStatusLine(
@@ -2559,7 +2740,7 @@ export default function Home() {
 
     setGraph(createIntentBranchDemoGraph());
     setSelectedNodeId("branch_1");
-    setRunInput(JSON.stringify({ user_query: "refund_request 用户申请退款" }, null, 2));
+    setRunInput(JSON.stringify({ rawQuery: "refund_request 用户申请退款" }, null, 2));
     setValidation(null);
     setTrace(null);
     setStatusLine("已生成 Intent + Branch 示例草稿");
@@ -2579,7 +2760,7 @@ export default function Home() {
 
     setGraph(createApiMessageDemoGraph());
     setSelectedNodeId("api_1");
-    setRunInput(JSON.stringify({ user_query: "查询订单状态", order_id: "A-1001" }, null, 2));
+    setRunInput(JSON.stringify({ rawQuery: "查询订单状态", order_id: "A-1001" }, null, 2));
     setValidation(null);
     setTrace(null);
     setStatusLine("已生成 API + Message 示例草稿");
@@ -2689,6 +2870,14 @@ export default function Home() {
           >
             <RefreshCw size={16} />
             刷新
+          </button>
+          <button
+            className="icon-button"
+            onClick={() => applyDeepSeekQaDemoTemplate()}
+            disabled={!selectedWorkflow || busyAction !== null}
+          >
+            <Bot size={16} />
+            DeepSeek 问答
           </button>
           <button
             className="icon-button"
@@ -2824,6 +3013,13 @@ export default function Home() {
               <Play size={16} />
               发布并运行
             </button>
+            <a
+              className="icon-button"
+              href={selectedWorkflow?.current_version_id ? `/chat?workflow_id=${selectedWorkflow.id}` : "/chat"}
+            >
+              <MessageSquare size={16} />
+              去对话
+            </a>
           </div>
         </header>
 
@@ -2988,6 +3184,30 @@ export default function Home() {
                       ))}
                     </div>
                   </div>
+                  <div className="run-preflight">
+                    <div>
+                      <span>运行版本</span>
+                      <strong>{runVersionLabel}</strong>
+                    </div>
+                    <div>
+                      <span>本地代码</span>
+                      <strong className={runCodeModified ? "warning-text" : ""}>{runCodeStatus}</strong>
+                    </div>
+                    <div>
+                      <span>代码 Hash</span>
+                      <code title={currentVersionDetail?.code_hash ?? undefined}>{runCodeHash}</code>
+                    </div>
+                  </div>
+                  {runCodeModified ? (
+                    <p className="run-preflight-warning">
+                      本地 workflow.py 已改动，本次运行会执行本地文件，并在 Trace 记录 code_modified=true。
+                    </p>
+                  ) : null}
+                  {runCodePath ? (
+                    <small className="run-code-path" title={runCodePath}>
+                      代码路径：{runCodePath}
+                    </small>
+                  ) : null}
                   <textarea
                     id="run-input"
                     value={runInput}
@@ -4305,7 +4525,9 @@ export default function Home() {
             </section>
 
             <section className="model-grid">
-              {modelProviders.map((provider) => (
+              {modelProviders.map((provider) => {
+                const diagnostic = provider.diagnostic;
+                return (
                 <article className="model-provider-card" key={provider.id}>
                   <div className="model-card-heading">
                     <div>
@@ -4315,7 +4537,36 @@ export default function Home() {
                       </span>
                       <small>{provider.base_url || "no base_url"}</small>
                     </div>
+                    <span className={`model-provider-health ${diagnostic?.status ?? "unknown"}`}>
+                      {modelProviderDiagnosticLabel(diagnostic?.status)}
+                    </span>
                   </div>
+                  {diagnostic ? (
+                    <div className="model-provider-diagnostic">
+                      <div>
+                        <span>API Key</span>
+                        <strong>{diagnostic.api_key_available ? "可用" : "不可用"}</strong>
+                      </div>
+                      <div>
+                        <span>来源</span>
+                        <strong>{modelProviderKeySourceLabel(diagnostic.api_key_source)}</strong>
+                      </div>
+                      <div>
+                        <span>引用</span>
+                        <strong>{diagnostic.api_key_env ?? diagnostic.api_key_secret ?? "无"}</strong>
+                      </div>
+                      <small>{diagnostic.message}</small>
+                    </div>
+                  ) : null}
+                  {provider.provider_type === "deepseek" && modelDefaults ? (
+                    <div className="model-provider-defaults">
+                      <span>DeepSeek 默认模型</span>
+                      <strong>{modelDefaults.deepseek.model_name}</strong>
+                      <small>
+                        {modelDefaults.deepseek.base_url} · context {modelDefaults.deepseek.context_window}
+                      </small>
+                    </div>
+                  ) : null}
                   <div className="edit-fields">
                     <label>
                       <span>name</span>
@@ -4597,7 +4848,8 @@ export default function Home() {
                     ) : null}
                   </div>
                 </article>
-              ))}
+                );
+              })}
               {modelProviders.length === 0 ? <p className="empty">暂无 model provider</p> : null}
             </section>
           </section>

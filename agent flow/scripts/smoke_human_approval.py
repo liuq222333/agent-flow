@@ -197,8 +197,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the Human Approval smoke flow.")
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("AGENT_FLOW_BASE_URL", DEFAULT_BASE_URL),
-        help="API base URL. Defaults to AGENT_FLOW_BASE_URL or localhost.",
+        default=(
+            os.environ.get("AGENT_FLOW_BASE_URL")
+            or os.environ.get("API_BASE_URL")
+            or os.environ.get("NEXT_PUBLIC_API_BASE_URL")
+            or DEFAULT_BASE_URL
+        ),
+        help="API base URL. Defaults to AGENT_FLOW_BASE_URL, API_BASE_URL, NEXT_PUBLIC_API_BASE_URL, or localhost.",
     )
     parser.add_argument(
         "--token",

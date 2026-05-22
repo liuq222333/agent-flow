@@ -191,6 +191,33 @@ export type ModelProvider = {
   base_url?: string | null;
   status: string;
   config_json?: JsonObject | null;
+  diagnostic?: ModelProviderDiagnostic | null;
+};
+
+export type ModelProviderDiagnostic = {
+  status: "ready" | "missing_api_key" | "disabled" | "not_required" | string;
+  message: string;
+  requires_api_key: boolean;
+  api_key_available: boolean;
+  api_key_source: "env" | "secret" | "none" | "not_required" | string;
+  api_key_env?: string | null;
+  api_key_secret?: string | null;
+  base_url_effective?: string | null;
+};
+
+export type ModelDefaults = {
+  default_provider: string;
+  deepseek: {
+    provider_name: string;
+    provider_type: string;
+    base_url: string;
+    api_key_secret: string;
+    model_name: string;
+    model_type: "chat";
+    display_name: string;
+    context_window: number;
+    default_config: JsonObject;
+  };
 };
 
 export type ModelConfig = {
@@ -286,6 +313,11 @@ export type RunListItem = {
   run_id?: number;
   status: string;
   created_at?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  metadata_json?: JsonObject | null;
 };
 
 export type RunMode = "sync" | "async";
@@ -317,6 +349,7 @@ export type NodeCatalogItem = {
   config: JsonObject;
   input_mapping?: JsonObject;
   output_mapping?: JsonObject;
+  hidden?: boolean;
 };
 
 export type WorkflowNodeData = Record<string, unknown> & {

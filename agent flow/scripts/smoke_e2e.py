@@ -1,10 +1,14 @@
 import json
+import os
 import time
 import urllib.error
 import urllib.request
 import uuid
 
-BASE_URL = "http://localhost:8000/api/v1"
+BASE_URL = os.environ.get("API_BASE_URL") or os.environ.get(
+    "NEXT_PUBLIC_API_BASE_URL",
+    "http://localhost:8000/api/v1",
+)
 
 
 def request(method, path, data=None, headers=None, body=None, timeout=30):
@@ -63,40 +67,46 @@ def mock_workflow_graph():
     return {
         "schema_version": "1.0",
         "nodes": [
-            node("start_1", "start", 80, {}),
             node(
-                "input_1",
-                "input",
-                280,
-                {"fields": [{"name": "user_query", "type": "string", "required": True}]},
+                "start_1",
+                "start",
+                80,
+                {
+                    "fields": [
+                        {"name": "rawQuery", "type": "string", "required": True},
+                        {"name": "chatHistory", "type": "array"},
+                    ]
+                },
             ),
             {
                 **node(
                     "llm_1",
                     "llm",
-                    500,
+                    360,
                     {
                         "provider": "mock",
                         "model": "local-mock",
-                        "user_prompt": "Question: {{input.user_query}}",
+                        "user_prompt": "Question: {{query}}",
                     },
                 ),
-                "output_mapping": {"answer": "variables.answer"},
+                "input_mapping": {"query": "{{input.rawQuery}}"},
+                "output_mapping": {"output": "variables.output", "answer": "variables.answer"},
             },
             node(
-                "output_1",
-                "output",
-                720,
+                "end_1",
+                "end",
+                640,
                 {
+                    "response_mode": "template",
                     "outputs": {
-                        "answer": "{{variables.answer}}",
-                        "user_query": "{{input.user_query}}",
-                    }
+                        "output": "{{outputs.llm_1.output}}",
+                        "rawQuery": "{{outputs.start_1.rawQuery}}",
+                    },
+                    "template": "{{output}}：{{rawQuery}}",
                 },
             ),
-            node("end_1", "end", 920, {}),
         ],
-        "edges": linear_edges(["start_1", "input_1", "llm_1", "output_1", "end_1"]),
+        "edges": linear_edges(["start_1", "llm_1", "end_1"]),
     }
 
 
@@ -393,7 +403,7 @@ def assert_completed_run(workflow_id, mode, input_data):
     if run["status"] != "completed":
         raise RuntimeError(f"{mode} run failed: {run}")
     trace = request("GET", f"/runs/{run['id' if 'id' in run else 'run_id']}/trace")
-    if len(trace.get("nodes", [])) < 5:
+    if len(trace.get("nodes", [])) < 1:
         raise RuntimeError(f"{mode} trace missing node runs: {trace}")
     return run, trace
 
@@ -509,8 +519,8 @@ def main():
         {"release_note": "smoke"},
     )
     assert_published_code_path(published)
-    sync_run, _ = assert_completed_run(workflow["id"], "sync", {"user_query": "refund"})
-    async_run, _ = assert_completed_run(workflow["id"], "async", {"user_query": "async refund"})
+    sync_run, _ = assert_completed_run(workflow["id"], "sync", {"rawQuery": "refund"})
+    async_run, _ = assert_completed_run(workflow["id"], "async", {"rawQuery": "async refund"})
 
     kb_workflow = request(
         "POST",

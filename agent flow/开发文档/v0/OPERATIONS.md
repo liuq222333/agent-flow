@@ -12,7 +12,7 @@ MVP 核心链路已经完成：
 - Knowledge 文档上传、worker 处理、pgvector 检索和关键词回退。
 - Intent、Branch、API、Message、LLM、Output 等核心节点闭环。
 - Trace 展示 generated code metadata、节点 input/output/error/metadata，并对敏感 header 做脱敏。
-- `/api/v1/health`、`/api/v1/ready`、`/api/v1/metrics`、`npm run smoke:e2e` 可作为基础部署验收入口。
+- `/api/v1/health`、`/api/v1/ready`、`/api/v1/metrics`、`.\scripts\smoke-e2e.ps1` 可作为基础部署验收入口。
 - Ops 队列与 worker 运维入口已支持 workflow/document worker 心跳、workflow run 队列深度、dead-letter 查看和恢复动作。
 
 M6 生产化基础收尾已完成：
@@ -54,7 +54,7 @@ M6 生产化基础收尾已完成：
 - 设置 `DATABASE_URL` 指向生产 PostgreSQL，并确认账号权限最小化。
 - 设置 `REDIS_URL` 指向生产 Redis，注意容器内外主机名和端口差异。
 - 设置 `SECRET_ENCRYPTION_KEY`，长度不少于 32 字符，并通过安全渠道分发。
-- 默认 LLM 选项为 DeepSeek V4-Flash，默认关闭 thinking mode；设置 `DEEPSEEK_API_KEY` 或通过平台 Secret 创建 `deepseek_api_key`。缺少 key 时 DeepSeek 节点会明确失败。
+- 默认 LLM 选项为 DeepSeek V4-Flash，默认关闭 thinking mode；可用 `DEEPSEEK_DEFAULT_MODEL`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_DEFAULT_CONTEXT_WINDOW` 和 `DEEPSEEK_API_KEY_SECRET` 调整默认模型、地址、上下文窗口和 Secret 引用。设置 `DEEPSEEK_API_KEY` 或通过平台 Secret 创建对应 key（默认 `deepseek_api_key`）。缺少 key 时 DeepSeek 节点会明确失败，Models 页面会显示 env/Secret 本地诊断结果；该诊断不会请求真实 DeepSeek。
 - 如使用 OpenAI，设置 `OPENAI_API_KEY` 或通过平台 Secret 创建 `openai_api_key`。
 - 设置 `CORS_ALLOWED_ORIGINS` 为实际前端域名，删除无关 localhost。
 - 设置 `STORAGE_DIR` 到持久化上传目录或替换为后续对象存储方案。
@@ -91,7 +91,7 @@ M6 生产化基础收尾已完成：
 部署后执行：
 
 ```powershell
-npm run smoke:e2e
+.\scripts\smoke-e2e.ps1
 ```
 
 该脚本默认访问 `http://localhost:8000/api/v1`。生产或测试环境如果不是本机地址，需要使用等价 smoke 方式或临时代理到目标 API。
